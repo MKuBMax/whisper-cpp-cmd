@@ -148,11 +148,11 @@ App，移动 App 后需要重新打开 App 并重新勾选来更新路径。
 
     bash package_app.sh
 
-构建机需要已有项目的 .venv-arm64 和 Homebrew 的 whisper-cpp；这些只是构建依赖，不需要同事安装。结果在：
+构建机需要已有项目的 .venv-arm64、Homebrew 的 whisper-cpp/libomp、CMake 和网络连接；脚本会按当前 ggml 版本重新构建不依赖 Homebrew 路径的 arm64 runtime。这些只是构建依赖，不需要同事安装。结果在：
 
     release/WhisperCppCmd-macOS-arm64.zip
 
-这个 zip 已包含 Python 依赖、whisper-cli、whisper-server 和动态库，但不包含体积很大的 Whisper 模型。同事解压后先运行 Prepare WhisperCppCmd.command，把模型放进 ~/Library/Application Support/WhisperCppCmd/models/，再双击 WhisperCppCmd.app。详细步骤见 zip 内的 README.md。
+这个 zip 已包含 Python 依赖、whisper-cli、whisper-server、ggml backend 和动态库，不依赖同事电脑上的 Homebrew；但不包含体积很大的 Whisper 模型。同事解压后先运行 Prepare WhisperCppCmd.command，把模型放进 ~/Library/Application Support/WhisperCppCmd/models/，再双击 WhisperCppCmd.app。详细步骤见 zip 内的 README.md。
 
 当前分发目标是 Apple Silicon；包尚未使用 Apple Developer ID 签名和 notarize，首次打开可能需要先尝试打开 App，再到“系统设置 → 隐私与安全性”中点击“仍要打开”。
 

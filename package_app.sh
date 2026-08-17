@@ -43,23 +43,91 @@ fi
 
 WHISPER_PREFIX="$(brew --prefix whisper-cpp 2>/dev/null || true)"
 GGML_PREFIX="$(brew --prefix ggml 2>/dev/null || true)"
-if [ -z "$WHISPER_PREFIX" ] || [ -z "$GGML_PREFIX" ]; then
+LIBOMP_PREFIX="$(brew --prefix libomp 2>/dev/null || true)"
+GGML_VERSION="$(brew list --versions ggml 2>/dev/null | awk 'NF { print $NF }' | tail -1)"
+if [ -z "$WHISPER_PREFIX" ] || [ -z "$GGML_PREFIX" ] || [ -z "$LIBOMP_PREFIX" ] || [ -z "$GGML_VERSION" ]; then
     echo "❌ 找不到 Homebrew 依赖，请先安装 whisper-cpp。" >&2
-    echo "   brew install whisper-cpp" >&2
+    echo "   brew install whisper-cpp libomp" >&2
     exit 1
 fi
+
+for build_tool in cmake curl; do
+    if ! command -v "$build_tool" >/dev/null 2>&1; then
+        echo "❌ 构建 standalone 分发包需要 $build_tool。" >&2
+        exit 1
+    fi
+done
 
 for required in \
     "$WHISPER_PREFIX/bin/whisper-cli" \
     "$WHISPER_PREFIX/bin/whisper-server" \
     "$WHISPER_PREFIX/lib/libwhisper.1.dylib" \
     "$GGML_PREFIX/lib/libggml.0.dylib" \
-    "$GGML_PREFIX/lib/libggml-base.0.dylib"; do
+    "$GGML_PREFIX/lib/libggml-base.0.dylib" \
+    "$LIBOMP_PREFIX/lib/libomp.dylib"; do
     if [ ! -e "$required" ]; then
         echo "❌ Homebrew 运行时文件不存在：$required" >&2
         exit 1
     fi
 done
+
+# Homebrew 的 ggml 动态库把本机 Cellar 的 libexec 目录编译进了
+# GGML_BACKEND_DIR。直接复制它会在打包机上误加载 Homebrew 后端，换到同事电脑
+# 又找不到后端。这里按同一 ggml 版本重新构建 arm64 runtime，不设置固定的
+# GGML_BACKEND_DIR，并把 backend 插件安装到 whisper 可执行文件旁边。
+GGML_BUILD_ROOT="$WORK_DIR/ggml-build"
+GGML_SOURCE_PARENT="$GGML_BUILD_ROOT/src"
+GGML_SOURCE_DIR="$GGML_SOURCE_PARENT/ggml-$GGML_VERSION"
+BUILT_GGML_PREFIX="$GGML_BUILD_ROOT/prefix"
+mkdir -p "$GGML_SOURCE_PARENT"
+echo "正在构建 standalone ggml runtime（版本 ${GGML_VERSION}）..."
+curl --fail --location --silent --show-error --retry 3 \
+    "https://github.com/ggml-org/ggml/archive/refs/tags/v$GGML_VERSION.tar.gz" \
+    | tar -xz -C "$GGML_SOURCE_PARENT"
+
+if [ ! -d "$GGML_SOURCE_DIR" ]; then
+    echo "❌ ggml 源码目录不存在：$GGML_SOURCE_DIR" >&2
+    exit 1
+fi
+
+if ! cmake -S "$GGML_SOURCE_DIR" -B "$GGML_BUILD_ROOT/build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_OSX_ARCHITECTURES=arm64 \
+    -DCMAKE_INSTALL_PREFIX="$BUILT_GGML_PREFIX" \
+    -DBUILD_SHARED_LIBS=ON \
+    -DGGML_ALL_WARNINGS=OFF \
+    -DGGML_BACKEND_DIR= \
+    -DGGML_BACKEND_DL=ON \
+    -DGGML_BLAS=ON \
+    -DGGML_BUILD_EXAMPLES=OFF \
+    -DGGML_BUILD_TESTS=OFF \
+    -DGGML_CCACHE=OFF \
+    -DGGML_LTO=ON \
+    -DGGML_NATIVE=OFF \
+    -DGGML_CPU_ALL_VARIANTS=ON \
+    >"$GGML_BUILD_ROOT/configure.log" 2>&1; then
+    tail -80 "$GGML_BUILD_ROOT/configure.log" >&2
+    exit 1
+fi
+
+if ! cmake --build "$GGML_BUILD_ROOT/build" --parallel "$(sysctl -n hw.ncpu)" \
+    >"$GGML_BUILD_ROOT/build.log" 2>&1; then
+    tail -80 "$GGML_BUILD_ROOT/build.log" >&2
+    exit 1
+fi
+
+if ! cmake --install "$GGML_BUILD_ROOT/build" \
+    >"$GGML_BUILD_ROOT/install.log" 2>&1; then
+    tail -80 "$GGML_BUILD_ROOT/install.log" >&2
+    exit 1
+fi
+
+CUSTOM_GGML_LIB="$(find "$BUILT_GGML_PREFIX/lib" -maxdepth 1 -type f -name 'libggml.0.*.dylib' -print -quit)"
+CUSTOM_GGML_BASE="$(find "$BUILT_GGML_PREFIX/lib" -maxdepth 1 -type f -name 'libggml-base.0.*.dylib' -print -quit)"
+if [ -z "$CUSTOM_GGML_LIB" ] || [ -z "$CUSTOM_GGML_BASE" ]; then
+    echo "❌ 自包含 ggml runtime 构建结果不完整。" >&2
+    exit 1
+fi
 
 mkdir -p \
     "$RUNTIME_SOURCE/bin" \
@@ -84,8 +152,17 @@ fi
 cp -L "$WHISPER_PREFIX/bin/whisper-cli" "$RUNTIME_SOURCE/bin/whisper-cli"
 cp -L "$WHISPER_PREFIX/bin/whisper-server" "$RUNTIME_SOURCE/bin/whisper-server"
 cp -L "$WHISPER_PREFIX/lib/libwhisper.1.dylib" "$RUNTIME_SOURCE/lib/libwhisper.1.dylib"
-cp -L "$GGML_PREFIX/lib/libggml.0.dylib" "$RUNTIME_SOURCE/ggml/lib/libggml.0.dylib"
-cp -L "$GGML_PREFIX/lib/libggml-base.0.dylib" "$RUNTIME_SOURCE/ggml/lib/libggml-base.0.dylib"
+cp -L "$CUSTOM_GGML_LIB" "$RUNTIME_SOURCE/ggml/lib/libggml.0.dylib"
+cp -L "$CUSTOM_GGML_BASE" "$RUNTIME_SOURCE/ggml/lib/libggml-base.0.dylib"
+cp -L "$LIBOMP_PREFIX/lib/libomp.dylib" "$RUNTIME_SOURCE/lib/libomp.dylib"
+
+# ggml 的默认加载路径包含可执行文件所在目录；把所有动态 backend 放在 bin
+# 旁边，既不依赖当前工作目录，也不需要通过 GGML_BACKEND_PATH 猜测目录语义。
+for backend in "$BUILT_GGML_PREFIX"/bin/libggml-*.so; do
+    if [ -f "$backend" ]; then
+        cp -L "$backend" "$RUNTIME_SOURCE/bin/"
+    fi
+done
 
 # whisper.cpp 的 Homebrew bottle 默认指向 /opt/homebrew/opt/ggml；改成包内相对
 # 路径后，同一个 App 可在没有 Homebrew 的同事电脑上运行。
@@ -114,6 +191,18 @@ install_name_tool -change "@rpath/libggml-base.0.dylib" \
     "$RUNTIME_SOURCE/ggml/lib/libggml.0.dylib"
 install_name_tool -id "@rpath/libggml-base.0.dylib" \
     "$RUNTIME_SOURCE/ggml/lib/libggml-base.0.dylib"
+install_name_tool -id "@rpath/libomp.dylib" \
+    "$RUNTIME_SOURCE/lib/libomp.dylib"
+for backend in "$RUNTIME_SOURCE"/bin/libggml-*.so; do
+    install_name_tool -change "@rpath/libggml-base.0.dylib" \
+        "@loader_path/../ggml/lib/libggml-base.0.dylib" \
+        "$backend"
+    if otool -L "$backend" | grep -Fq "$LIBOMP_PREFIX/lib/libomp.dylib"; then
+        install_name_tool -change "$LIBOMP_PREFIX/lib/libomp.dylib" \
+            "@loader_path/../lib/libomp.dylib" \
+            "$backend"
+    fi
+done
 chmod +x "$RUNTIME_SOURCE/bin/whisper-cli" "$RUNTIME_SOURCE/bin/whisper-server"
 
 rm -rf "$RELEASE_DIR"
@@ -133,8 +222,50 @@ cp "$PROJECT_DIR/distribution/Prepare WhisperCppCmd.command" "$PACKAGE_DIR/Prepa
 cp "$PROJECT_DIR/distribution/THIRD_PARTY_NOTICES.txt" "$PACKAGE_DIR/THIRD_PARTY_NOTICES.txt"
 chmod +x "$PACKAGE_DIR/Prepare WhisperCppCmd.command"
 
-BUNDLED_CLI="$PACKAGE_DIR/$APP_NAME.app/Contents/Resources/whisper-runtime/bin/whisper-cli"
-BUNDLED_SERVER="$PACKAGE_DIR/$APP_NAME.app/Contents/Resources/whisper-runtime/bin/whisper-server"
+BUNDLED_RUNTIME_DIR="$PACKAGE_DIR/$APP_NAME.app/Contents/Resources/whisper-runtime"
+BUNDLED_CLI="$BUNDLED_RUNTIME_DIR/bin/whisper-cli"
+BUNDLED_SERVER="$BUNDLED_RUNTIME_DIR/bin/whisper-server"
+BUNDLED_BACKEND_DIR="$BUNDLED_RUNTIME_DIR/bin"
+
+if ! compgen -G "$BUNDLED_BACKEND_DIR/libggml-*.so" >/dev/null; then
+    echo "❌ standalone App 没有包含 ggml backend 插件。" >&2
+    exit 1
+fi
+
+# 运行时 Mach-O 文件位于 Resources 下的自定义目录，codesign --deep 不会
+# 可靠地替它们逐个更新签名；先逐个 ad hoc 重签，再签 App 外层。
+for runtime_binary in \
+    "$BUNDLED_CLI" \
+    "$BUNDLED_SERVER" \
+    "$BUNDLED_RUNTIME_DIR/lib/libwhisper.1.dylib" \
+    "$BUNDLED_RUNTIME_DIR/lib/libomp.dylib" \
+    "$BUNDLED_RUNTIME_DIR/ggml/lib/libggml.0.dylib" \
+    "$BUNDLED_RUNTIME_DIR/ggml/lib/libggml-base.0.dylib"; do
+    codesign --force --sign - "$runtime_binary"
+done
+for backend in "$BUNDLED_BACKEND_DIR"/libggml-*.so; do
+    codesign --force --sign - "$backend"
+done
+
+# py2app 在复制 standalone 运行时之前已经签过 App；运行时文件又经过
+# install_name_tool 修改并被放入 App 后，必须在所有内容就位后重新签名，
+# 否则 CodeResources 会把这些文件识别为未封装资源。
+codesign --force --deep --sign - "$PACKAGE_DIR/$APP_NAME.app"
+codesign --verify --deep --strict "$PACKAGE_DIR/$APP_NAME.app"
+
+for runtime_binary in \
+    "$BUNDLED_CLI" \
+    "$BUNDLED_SERVER" \
+    "$BUNDLED_RUNTIME_DIR/lib/libwhisper.1.dylib" \
+    "$BUNDLED_RUNTIME_DIR/lib/libomp.dylib" \
+    "$BUNDLED_RUNTIME_DIR/ggml/lib/libggml.0.dylib" \
+    "$BUNDLED_RUNTIME_DIR/ggml/lib/libggml-base.0.dylib"; do
+    codesign --verify --verbose=2 "$runtime_binary" >/dev/null
+done
+for backend in "$BUNDLED_BACKEND_DIR"/libggml-*.so; do
+    codesign --verify --verbose=2 "$backend" >/dev/null
+done
+
 if [ ! -x "$BUNDLED_CLI" ] || [ ! -x "$BUNDLED_SERVER" ]; then
     echo "❌ standalone App 没有包含 whisper.cpp 运行时。" >&2
     exit 1
@@ -149,6 +280,35 @@ for bundled_binary in "$BUNDLED_CLI" "$BUNDLED_SERVER"; do
         exit 1
     fi
 done
+for bundled_backend in "$BUNDLED_BACKEND_DIR"/libggml-*.so; do
+    if ! file "$bundled_backend" | grep -q "arm64"; then
+        echo "❌ 分发包里的 ggml backend 不是 arm64：$bundled_backend" >&2
+        exit 1
+    fi
+    if otool -L "$bundled_backend" | grep -q "/opt/homebrew"; then
+        echo "❌ ggml backend 仍引用 Homebrew 路径：$bundled_backend" >&2
+        exit 1
+    fi
+done
+for bundled_library in \
+    "$BUNDLED_RUNTIME_DIR/lib/libwhisper.1.dylib" \
+    "$BUNDLED_RUNTIME_DIR/lib/libomp.dylib" \
+    "$BUNDLED_RUNTIME_DIR/ggml/lib/libggml.0.dylib" \
+    "$BUNDLED_RUNTIME_DIR/ggml/lib/libggml-base.0.dylib"; do
+    if ! file "$bundled_library" | grep -q "arm64"; then
+        echo "❌ 分发包里的动态库不是 arm64：$bundled_library" >&2
+        exit 1
+    fi
+    if otool -L "$bundled_library" | grep -q "/opt/homebrew"; then
+        echo "❌ 分发包动态库仍引用 Homebrew 路径：$bundled_library" >&2
+        exit 1
+    fi
+done
+
+# 在打包机上直接运行一次，确保动态库和 backend 的相对路径完整；这里主动
+# 清除外部环境变量，测试 standalone 本身不依赖构建机的 ggml 配置。
+env -u GGML_BACKEND_PATH "$BUNDLED_CLI" --help >/dev/null 2>&1
+env -u GGML_BACKEND_PATH "$BUNDLED_SERVER" --help >/dev/null 2>&1
 
 ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_DIR" "$ZIP_PATH"
 
