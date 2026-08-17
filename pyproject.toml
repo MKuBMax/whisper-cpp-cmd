@@ -1,0 +1,6 @@
+# 仅用于 pytest 配置；不含 [build-system]，不影响 setup.py / py2app 构建
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+addopts = "-q"

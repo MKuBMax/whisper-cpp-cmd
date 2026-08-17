@@ -1,0 +1,15 @@
+WhisperCppCmd 分发包内置了 whisper.cpp / ggml 的 arm64 二进制运行时。
+
+上游项目：
+- whisper.cpp: https://github.com/ggml-org/whisper.cpp
+- ggml: https://github.com/ggml-org/ggml
+
+这些上游项目使用 MIT License。对应的上游许可证和版权信息以发布版本仓库为准。
+
+WhisperCppCmd 还使用 Silero VAD 模型：
+- 模型文件：models/ggml-silero-v6.2.0.bin
+- 来源：https://huggingface.co/ggml-org/whisper-vad
+- 许可证：MIT License
+
+该模型为转换为 ggml 格式的 Silero VAD 模型，用于本项目的语音活动检测。
+模型来源页面中的许可证和版权信息以其发布版本为准。

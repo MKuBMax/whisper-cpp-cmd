@@ -1,0 +1,20 @@
+{
+  "current_model": "large-v3",
+  "language": "zh",
+  "sample_rate": 16000,
+  "duck_media": true,
+  "duck_volume": 10,
+  "whisper_cli_path": "",
+  "n_threads": 8,
+  "auto_release_minutes": 10,
+  "min_duration": 0.3,
+  "block_size": 256,
+  "latency": "low",
+  "audio_device_name": null,
+  "auto_paste": true,
+  "paste_delay": 0.03,
+  "chinese_script": "simplified",
+  "transcription_prompt": "请使用中文标点符号输出，句子尽量完整自然。",
+  "history_max_entries": 100,
+  "verbose": true
+}

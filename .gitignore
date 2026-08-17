@@ -1,0 +1,16 @@
+history.json
+*.pyc
+__pycache__/
+*.wav
+.DS_Store
+models/*.bin
+!models/ggml-silero-v6.2.0.bin
+WhisperCppCmd.app/
+logs/
+config.json
+glossary.txt
+.py2app-assets/
+.py2app-build/
+.py2app-dist/
+.pytest_cache/
+release/

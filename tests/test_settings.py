@@ -1,0 +1,78 @@
+"""Settings load/save 往返与健壮性单测（顺带覆盖 A2 原子写）。"""
+
+import os
+
+from config.settings import Settings
+
+
+def test_defaults_when_file_missing(tmp_path):
+    s = Settings.load(str(tmp_path / "nope.json"))
+    assert s.current_model == "large-v3"
+    assert s.language == "zh"
+
+
+def test_round_trip(tmp_path):
+    path = str(tmp_path / "config.json")
+    s = Settings()
+    s.current_model = "large-v3-turbo"
+    s.language = "en"
+    s.auto_paste = False
+    s.audio_device_name = "外接麦克风"
+    s.save(path)
+
+    # 原子写：无 .tmp 残留
+    assert not os.path.exists(path + ".tmp")
+
+    loaded = Settings.load(path)
+    assert loaded.current_model == "large-v3-turbo"
+    assert loaded.language == "en"
+    assert loaded.auto_paste is False
+    assert loaded.audio_device_name == "外接麦克风"
+
+
+def test_invalid_json_falls_back_to_defaults(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not valid json", encoding="utf-8")
+    s = Settings.load(str(bad))
+    # 异常被吞掉并回退默认值
+    assert s.current_model == "large-v3"
+
+
+def test_glossary_terms_reads_filters_and_dedups(tmp_path):
+    g = tmp_path / "glossary.txt"
+    g.write_text(
+        "# 这是注释\n"
+        "WhisperCppCmd\n"
+        "\n"
+        "PyObjC\n"
+        "# 另一条注释\n"
+        "Karpathy\n"
+        "PyObjC\n",  # 重复项应被去重
+        encoding="utf-8",
+    )
+    s = Settings()
+    s.glossary_file = str(g)
+    assert s.get_glossary_terms() == ["WhisperCppCmd", "PyObjC", "Karpathy"]
+
+
+def test_glossary_terms_missing_file_returns_empty(tmp_path):
+    s = Settings()
+    s.glossary_file = str(tmp_path / "nope.txt")
+    assert s.get_glossary_terms() == []
+
+
+def test_transcription_prompt_combines_style_and_glossary(tmp_path):
+    g = tmp_path / "glossary.txt"
+    g.write_text("WhisperCppCmd\nPyObjC\n", encoding="utf-8")
+    s = Settings()
+    s.glossary_file = str(g)
+    prompt = s.get_transcription_prompt()
+    assert "请使用中文标点符号输出" in prompt
+    assert "WhisperCppCmd、PyObjC" in prompt
+
+
+def test_transcription_prompt_style_only_when_no_glossary(tmp_path):
+    s = Settings()
+    s.glossary_file = str(tmp_path / "nope.txt")
+    # 无术语表时只返回风格 prompt（与既有行为一致）
+    assert s.get_transcription_prompt() == s.transcription_prompt.strip()

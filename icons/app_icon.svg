@@ -1,0 +1,46 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="rainbowText" x1="570" y1="0" x2="860" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF453A"/>
+      <stop offset="0.17" stop-color="#FF9F0A"/>
+      <stop offset="0.34" stop-color="#FFD60A"/>
+      <stop offset="0.51" stop-color="#30D158"/>
+      <stop offset="0.68" stop-color="#64D2FF"/>
+      <stop offset="0.84" stop-color="#0A84FF"/>
+      <stop offset="1" stop-color="#BF5AF2"/>
+    </linearGradient>
+    <clipPath id="iconClip">
+      <rect x="48" y="48" width="928" height="928" rx="240"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#iconClip)">
+    <rect x="48" y="48" width="928" height="928" rx="240" fill="#101012"/>
+
+    <!-- Monochrome voice input. -->
+    <g fill="none" stroke="#F5F5F7" stroke-linecap="round">
+      <path d="M142 418C102 472 102 552 142 606" stroke-width="14" stroke-opacity="0.2"/>
+      <path d="M182 456V568" stroke-width="22" stroke-opacity="0.36"/>
+      <path d="M232 400V624" stroke-width="24" stroke-opacity="0.58"/>
+      <path d="M282 344V680" stroke-width="28"/>
+      <path d="M334 388V636" stroke-width="24" stroke-opacity="0.58"/>
+      <path d="M384 442V582" stroke-width="22" stroke-opacity="0.36"/>
+    </g>
+
+    <!-- Direction of transcription. -->
+    <g fill="none" stroke="#F5F5F7" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.62">
+      <path d="M420 512H512" stroke-width="16"/>
+      <path d="M482 480L514 512L482 544" stroke-width="16"/>
+    </g>
+
+    <!-- Colorful text output, reduced to simple word-like strokes. -->
+    <g fill="none" stroke="url(#rainbowText)" stroke-width="24" stroke-linecap="round">
+      <path d="M584 358H650M680 358H744M774 358H832"/>
+      <path d="M584 434H624M654 434H744M774 434H814"/>
+      <path d="M584 510H688M718 510H798M828 510H850"/>
+      <path d="M584 586H638M668 586H756M786 586H824"/>
+    </g>
+  </g>
+
+  <rect x="48" y="48" width="928" height="928" rx="240" stroke="#FFFFFF" stroke-opacity="0.2" stroke-width="6"/>
+</svg>
