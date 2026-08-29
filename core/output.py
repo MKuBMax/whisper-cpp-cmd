@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-输出处理模块 - 文本后处理和格式化
+输出处理模块 - 文本格式化和历史记录
 """
 
 from typing import Optional, Callable
@@ -69,10 +69,10 @@ class OutputHandler:
         Returns:
             文本输出对象
         """
-        normalized_text = normalize_chinese_script(text, self.config.chinese_script)
+        output_text = normalize_chinese_script(text, self.config.chinese_script)
 
         output = TextOutput(
-            text=normalized_text,
+            text=output_text,
             model=model,
             language=language,
             timestamp=datetime.now(),
@@ -84,13 +84,13 @@ class OutputHandler:
                 "%s output.process begin success=%s text_len=%s",
                 self.trace.prefix("output"),
                 success,
-                len(normalized_text),
+                len(output_text),
             )
         
         if self.config.verbose:
             self._log_output(output)
         
-        if success and self.config.save_history:
+        if success and output.text.strip() and self.config.save_history:
             self._save_to_history(output)
         
         if self._on_output_callback:
@@ -100,7 +100,7 @@ class OutputHandler:
                 "%s output.process done success=%s text_len=%s",
                 self.trace.prefix("output"),
                 success,
-                len(normalized_text),
+                len(output_text),
             )
         
         return output
@@ -148,7 +148,7 @@ class OutputHandler:
     def set_on_output(self, callback: Callable):
         """设置输出回调"""
         self._on_output_callback = callback
-    
+
     def get_history(self, count: int = 10) -> list:
         """获取历史记录"""
         if not os.path.exists(self.config.history_file):

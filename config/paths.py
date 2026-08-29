@@ -90,6 +90,18 @@ def resource_path(*parts: str) -> str:
     return os.path.join(resource_root(), *parts)
 
 
+def update_helper_path() -> Optional[str]:
+    """查找 standalone 包内或源码目录中的更新替换 helper。"""
+    candidates = (
+        resource_path("update_app.sh"),
+        resource_path("distribution", "update_app.sh"),
+    )
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
 def app_executable() -> Optional[str]:
     """返回当前 py2app App 自身的可执行文件路径。
 

@@ -127,12 +127,18 @@ class LiveDictationSession:
         if isinstance(self.trace, DictationTrace):
             logger.info("%s live_dictation.stop signal_sent", self.trace.prefix("live_dictation"))
 
-    def finalize(self, final_text: str) -> None:
+    def finalize(self, final_text: str) -> bool:
+        """用最终文本收尾并返回是否确认写入目标输入框。"""
+
         final_text = normalize_chinese_script(final_text or "", self.config.chinese_script)
         with self._output_lock:
-            if final_text != self._rendered_text:
-                self.clipboard.replace_typed_text(final_text, self._rendered_text)
+            if final_text == self._rendered_text:
+                return True
+            if not self.clipboard.replace_typed_text(final_text, self._rendered_text):
+                logger.warning("实时听写最终文本插入失败：current_len=%s next_len=%s", len(self._rendered_text), len(final_text))
+                return False
             self._rendered_text = final_text
+            return True
 
     def clear(self) -> None:
         with self._output_lock:
@@ -280,7 +286,9 @@ class LiveDictationSession:
             if next_text != current:
                 if self._first_char_ms is None and next_text:
                     self._first_char_ms = round(self.trace.elapsed_ms(), 1) if isinstance(self.trace, DictationTrace) else None
-                self.clipboard.replace_typed_text(next_text, current)
+                if not self.clipboard.replace_typed_text(next_text, current):
+                    logger.warning("实时听写预览插入失败：current_len=%s next_len=%s", len(current), len(next_text))
+                    return
                 self._rendered_text = next_text
                 logger.info("实时预览更新：len=%s", len(next_text))
                 if isinstance(self.trace, DictationTrace):
@@ -324,7 +332,9 @@ class LiveDictationSession:
                     len(transcript),
                 )
 
-            self.clipboard.replace_typed_text(transcript, current)
+            if not self.clipboard.replace_typed_text(transcript, current):
+                logger.warning("实时听写重整插入失败：current_len=%s next_len=%s", len(current), len(transcript))
+                return
             self._rendered_text = transcript
             if isinstance(self.trace, DictationTrace):
                 logger.info("%s reconcile applied current_len=%s transcript_len=%s", self.trace.prefix("reconcile"), len(current), len(transcript))

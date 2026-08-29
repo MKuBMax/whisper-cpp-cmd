@@ -59,19 +59,41 @@ _ACCESSIBILITY_SETTINGS_URLS = (
 )
 
 from config.settings import Settings
-from config.paths import app_executable, logs_dir
+from config.paths import (
+    app_executable,
+    is_standalone_bundle,
+    logs_dir,
+    runtime_root,
+    update_helper_path,
+)
+from config.version import APP_VERSION, UPDATE_REPOSITORY
 from core.dictation_trace import DictationTrace
 from core.pipeline import Pipeline, PipelineConfig, AudioConfig
 from core.perf_log import append_perf_log
 from core.live_dictation import LiveDictationSession, LiveDictationConfig
 from core.media_ducker import MediaDucker
+from core.stats import format_stats, load_perf_records, summarize_perf_records
+from core.update_checker import (
+    cleanup_staged_app,
+    fetch_latest_release,
+    find_macos_asset,
+    is_newer,
+    launch_update_helper,
+    read_code_signature,
+    stage_release_app,
+)
 from core import login_item
 from ui.status_bar import StatusBarController
 from ui.overlay_window import RecordingOverlay
+from ui.settings_window import SettingsWindowController
+from ui.stats_window import StatsWindowController
+from ui.onboarding_window import OnboardingWindowController
 from app import diagnostics
 
 # 模型下载页（ggml 模型正源）；如需国内镜像可改此常量
 MODEL_DOWNLOAD_URL = "https://huggingface.co/ggerganov/whisper.cpp/tree/main"
+UPDATE_API_URL = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
+_APP_BUNDLE_ID = "com.mkbm.whispercppcmd"
 
 # watchdog 触发阈值 = 转录超时 + 宽限，避免正常长转录被误判卡死
 _WATCHDOG_GRACE_SECONDS = 15.0
@@ -79,6 +101,7 @@ _WATCHDOG_GRACE_SECONDS = 15.0
 # 10s 容忍系统短暂卡顿（Dock 动画/WindowServer），Pa_OpenStream 级冻结持续数十秒故延迟可接受。
 _MAIN_THREAD_WATCHDOG_THRESHOLD = 10.0
 _WATCHDOG_POLL_INTERVAL = 5.0  # watchdog 轮询间隔
+_UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 
 # 可配置录音触发键：名称 → 菜单标签（Key 对象由名称 getattr 得到）
 _HOTKEY_LABELS = {
@@ -179,6 +202,7 @@ class VoiceInputApp:
         self._shutdown_lock = threading.Lock()
         self._state = "idle"
         self._last_result = "无"
+        self._model_setup_required = False
         self._error_reset_timer: threading.Timer | None = None
         self._paused = False
         self._idle_release_timer: threading.Timer | None = None
@@ -209,6 +233,10 @@ class VoiceInputApp:
         self._input_monitoring_trusted: bool | None = None
         self._permission_repair_alert_key = None
         self._overlay: RecordingOverlay | None = None
+        self._settings_window: SettingsWindowController | None = None
+        self._stats_window: StatsWindowController | None = None
+        self._onboarding_window: OnboardingWindowController | None = None
+        self._update_thread: threading.Thread | None = None
         self._perf_log_path = os.path.join(
             logs_dir(), "perf.jsonl",
         )
@@ -228,9 +256,8 @@ class VoiceInputApp:
         os.makedirs(self.settings.models_dir, exist_ok=True)
         if not self.settings.model_exists():
             print(f"❌ 模型文件不存在：{self.settings.get_model_path()}")
-            return False
-
-        if not self._create_pipeline():
+            self._model_setup_required = True
+        elif not self._create_pipeline():
             return False
 
         AppKit.NSApplication.sharedApplication()
@@ -257,7 +284,14 @@ class VoiceInputApp:
         """打印状态信息"""
         pipeline_status = self.pipeline.get_status() if self.pipeline else {}
         print(f"当前模型：{self.settings.current_model}")
-        print(f"识别语言：{self.settings.language}")
+        language_labels = {
+            "auto": "自动识别（多语言）",
+            "zh": "中文",
+            "en": "English",
+            "ja": "日本語",
+            "ko": "한국어",
+        }
+        print(f"识别语言：{language_labels.get(self.settings.language, self.settings.language)}")
         print(f"中文脚本：{self.settings.chinese_script}")
         print(f"听写模式：{'预览模式' if self.settings.dictation_mode == 'preview' else '快速模式'}")
         print(f"录音采样率：{self.settings.sample_rate}Hz")
@@ -389,6 +423,185 @@ class VoiceInputApp:
         self._live_dictation.trace = None
         return self.pipeline.initialize()
 
+    def open_settings(self) -> None:
+        if self._settings_window is None:
+            self._settings_window = SettingsWindowController.alloc().initWithApp_(self)
+        self._settings_window.show()
+
+    def apply_app_settings(self, values: dict) -> None:
+        """保存设置窗口中的应用级选项。"""
+        if "update_check_enabled" in values:
+            self.settings.update_check_enabled = bool(values["update_check_enabled"])
+        self.settings.__post_init__()
+        self.settings.save()
+        self._refresh_status_bar_details()
+
+    def get_stats_text(self) -> str:
+        summary = summarize_perf_records(load_perf_records(self._perf_log_path))
+        return f"WhisperCppCmd {APP_VERSION}\n\n{format_stats(summary)}"
+
+    def show_stats(self) -> None:
+        if self._stats_window is None:
+            self._stats_window = StatsWindowController.alloc().initWithApp_(self)
+        self._stats_window.show()
+
+    def show_onboarding_if_needed(self) -> None:
+        if self.settings.onboarding_completed:
+            return
+        if self._onboarding_window is None:
+            self._onboarding_window = OnboardingWindowController.alloc().initWithApp_(self)
+        self._onboarding_window.show()
+
+    def _check_for_updates_if_due(self) -> None:
+        """每天最多自动检查一次；自动检查不打扰用户显示“已最新”。"""
+        if not self.settings.update_check_enabled:
+            return
+        try:
+            last_checked = datetime.fromisoformat(self.settings.last_update_check_at).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            last_checked = 0.0
+        if time.time() - last_checked < _UPDATE_CHECK_INTERVAL_SECONDS:
+            return
+        self.settings.last_update_check_at = datetime.now().isoformat(timespec="seconds")
+        self.settings.save()
+        self.check_for_updates(silent=True)
+
+    def check_for_updates(self, silent: bool = False) -> None:
+        """后台检查 GitHub Release；用户确认后下载并安装。"""
+        self._logger.info("开始检查更新：current=%s", APP_VERSION)
+
+        def worker():
+            try:
+                release = fetch_latest_release(UPDATE_API_URL)
+                newer = is_newer(APP_VERSION, release)
+                AppHelper.callAfter(self._show_update_result, release, newer, "", silent)
+            except Exception as exc:
+                self._logger.info("检查更新失败：%s", exc)
+                AppHelper.callAfter(self._show_update_result, None, False, str(exc), silent)
+
+        threading.Thread(target=worker, name="UpdateChecker", daemon=True).start()
+
+    def _show_update_result(self, release, newer: bool, error: str, silent: bool = False):
+        if error:
+            if silent:
+                return
+            self._show_simple_alert("检查更新失败", f"暂时无法连接 GitHub Releases。\n\n{error}")
+            return
+        if release is None:
+            if silent:
+                return
+            self._show_simple_alert("检查更新失败", "GitHub 没有返回可用版本信息。")
+            return
+        if not newer:
+            if silent:
+                return
+            self._show_simple_alert("已是最新版本", f"当前版本：{APP_VERSION}\n最新发布：{release.tag_name}")
+            return
+
+        asset = find_macos_asset(release)
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_(f"发现新版本 {release.tag_name}")
+        alert.setInformativeText_(f"当前版本：{APP_VERSION}\n{release.name}")
+        if asset is None:
+            alert.addButtonWithTitle_("打开下载页")
+            alert.addButtonWithTitle_("稍后")
+            should_open = alert.runModal() == AppKit.NSAlertFirstButtonReturn
+        else:
+            alert.addButtonWithTitle_("下载并安装")
+            alert.addButtonWithTitle_("打开下载页")
+            alert.addButtonWithTitle_("稍后")
+            response = alert.runModal()
+            if response == AppKit.NSAlertFirstButtonReturn:
+                self._download_update(release)
+                return
+            should_open = response == AppKit.NSAlertSecondButtonReturn
+        if should_open and release.html_url:
+            import webbrowser
+            webbrowser.open(release.html_url)
+
+    def _download_update(self, release) -> None:
+        if self._update_thread is not None and self._update_thread.is_alive():
+            self._show_simple_alert("更新正在下载", "请稍候，当前已经有一个更新任务在进行。")
+            return
+
+        if not is_standalone_bundle():
+            # alias App 的 executable 指向源码/构建目录；让它走自动替换会
+            # 破坏开发环境，也无法保证新旧 bundle 的签名连续性。
+            self._show_simple_alert(
+                "当前版本不支持自动安装",
+                "自动更新仅在 standalone 分发包中可用，请打开正式安装的 App。",
+            )
+            return
+
+        def worker():
+            staged_app = ""
+            updates_root = os.path.join(runtime_root(), "updates")
+            try:
+                current_executable = app_executable()
+                if not current_executable:
+                    raise RuntimeError("当前运行环境找不到可用的 App executable")
+                # .../WhisperCppCmd.app/Contents/MacOS/WhisperCppCmd
+                current_app = os.path.abspath(
+                    os.path.dirname(os.path.dirname(os.path.dirname(current_executable)))
+                )
+                if os.path.basename(current_app) != "WhisperCppCmd.app":
+                    raise RuntimeError("当前 App bundle 路径无效")
+
+                # 固定更新签名连续性：Developer ID 安装要求同 Team ID；早期
+                # ad hoc 包则只接受 ad hoc 更新。helper 退出前会再次验证，防止
+                # staged 文件在下载完成后被替换造成 TOCTOU 绕过。
+                current_signature = read_code_signature(current_app)
+                signature_policy = {
+                    "trusted_team_id": current_signature.team_identifier or None,
+                    "require_developer_id": bool(current_signature.team_identifier),
+                    "require_adhoc": bool(current_signature.adhoc),
+                }
+                helper = update_helper_path()
+                if not helper:
+                    raise RuntimeError("当前运行环境找不到可用的更新 helper")
+                staged_app = stage_release_app(
+                    release,
+                    updates_root,
+                    **signature_policy,
+                )
+                AppHelper.callAfter(self._confirm_install_update, current_app, staged_app, helper)
+            except Exception as exc:
+                if staged_app:
+                    cleanup_staged_app(staged_app, updates_root)
+                self._logger.info("下载更新失败：%s", exc)
+                AppHelper.callAfter(
+                    self._show_simple_alert,
+                    "下载更新失败",
+                    str(exc),
+                )
+
+        self._update_thread = threading.Thread(target=worker, name="UpdateDownloader", daemon=True)
+        self._update_thread.start()
+
+    def _confirm_install_update(self, current_app: str, staged_app: str, helper: str) -> None:
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_("更新包已准备好")
+        alert.setInformativeText_("安装更新会关闭并重新打开 WhisperCppCmd。旧版本会保留为 .previous 备份。")
+        alert.addButtonWithTitle_("现在安装")
+        alert.addButtonWithTitle_("取消")
+        if alert.runModal() != AppKit.NSAlertFirstButtonReturn:
+            cleanup_staged_app(staged_app, os.path.dirname(staged_app))
+            return
+        try:
+            launch_update_helper(helper, current_app, staged_app)
+            self.shutdown()
+        except Exception as exc:
+            cleanup_staged_app(staged_app, os.path.dirname(staged_app))
+            self._logger.exception("启动更新 helper 失败")
+            self._show_simple_alert("安装更新失败", str(exc))
+
+    def _show_simple_alert(self, title: str, message: str) -> None:
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_(title)
+        alert.setInformativeText_(message)
+        alert.addButtonWithTitle_("好")
+        alert.runModal()
+
     def _prewarm_audio_devices(self):
         if self.pipeline is None:
             return
@@ -466,6 +679,7 @@ class VoiceInputApp:
 
         if not self.settings.model_exists():
             print(f"❌ 模型文件不存在：{self.settings.get_model_path()}")
+            self._model_setup_required = True
             self._last_result = "错误：模型文件不存在"
             self._set_state("error")
             self._refresh_status_bar_details()
@@ -478,8 +692,10 @@ class VoiceInputApp:
             return False
 
         self._backend_released = False
+        self._model_setup_required = False
         self._set_state("paused" if self._paused else "idle")
         self._refresh_status_bar_details()
+        self._refresh_status_bar_dynamic_details()
         self._schedule_idle_release_timer()
         return True
 
@@ -514,7 +730,7 @@ class VoiceInputApp:
             "en": "English",
             "ja": "日本語",
             "ko": "한국어",
-            "auto": "自动识别",
+            "auto": "自动识别（多语言）",
         }
         return [
             {"title": label, "value": code, "selected": code == self.settings.language}
@@ -566,22 +782,28 @@ class VoiceInputApp:
             self._hide_overlay()
 
     def _refresh_status_bar_details(self):
-        if self.status_bar is None or self.pipeline is None:
+        if self.status_bar is None:
             return
 
-        status = self.pipeline.get_status()
-        backend_text = status.get('backend', '-') or '-'
-        backend_detail = status.get('backend_detail', '')
-        if self._backend_released:
-            backend_detail = "已释放"
-        if backend_detail:
-            backend_text = f"{backend_text} / {backend_detail}"
+        if self.pipeline is None:
+            backend_text = "等待模型"
+        else:
+            status = self.pipeline.get_status()
+            backend_text = status.get('backend', '-') or '-'
+            backend_detail = status.get('backend_detail', '')
+            if self._backend_released:
+                backend_detail = "已释放"
+            if backend_detail:
+                backend_text = f"{backend_text} / {backend_detail}"
 
         AppHelper.callAfter(self.status_bar.setModelName_, self.settings.current_model)
         AppHelper.callAfter(self.status_bar.setBackendStatus_, backend_text)
         AppHelper.callAfter(self.status_bar.setLastResult_, self._truncate_menu_text(self._last_result))
         AppHelper.callAfter(self.status_bar.setPaused_, self._paused)
-        AppHelper.callAfter(self.status_bar.setReleaseBackendEnabled_, not self._backend_released)
+        AppHelper.callAfter(
+            self.status_bar.setReleaseBackendEnabled_,
+            bool(self.pipeline is not None and not self._backend_released),
+        )
         AppHelper.callAfter(self.status_bar.setAutoReleaseMinutes_, self.settings.auto_release_minutes)
         AppHelper.callAfter(self.status_bar.setAutoReleaseCountdown_, self._get_auto_release_countdown_text())
         AppHelper.callAfter(self.status_bar.setAutoPaste_, self.settings.auto_paste)
@@ -595,7 +817,7 @@ class VoiceInputApp:
         AppHelper.callAfter(self.status_bar.setDictationModeOptions_, self._get_dictation_mode_options())
 
     def _refresh_status_bar_dynamic_details(self):
-        if self.status_bar is None or self.pipeline is None:
+        if self.status_bar is None:
             return
 
         AppHelper.callAfter(self.status_bar.setModelOptions_, self._get_model_options())
@@ -661,10 +883,12 @@ class VoiceInputApp:
         监控结果用于准确展示和引导用户，不作为监听器启动的硬门槛。
         """
         try:
-            if prompt and _IOHID_REQUEST_ACCESS is not None:
-                # IOHIDRequestAccess 会以当前进程身份发起系统授权请求，
-                # 比 CGRequestListenEventAccess 更容易让 macOS 建立输入监控记录。
-                return bool(_IOHID_REQUEST_ACCESS(_IOHID_REQUEST_TYPE_LISTEN_EVENT))
+            if prompt:
+                # IOHIDRequestAccess 在部分 macOS/无 TTY 启动路径会同步等待
+                # 系统授权 UI，若在 NSRunLoop 启动前调用会把整个 App 卡住。
+                # 这里的“请求”统一交给调用方打开系统设置，保持主线程可用；
+                # 静默状态仍由 IOHIDCheckAccess/Quartz 查询。
+                return False
             if not prompt and _IOHID_CHECK_ACCESS is not None:
                 return int(
                     _IOHID_CHECK_ACCESS(_IOHID_REQUEST_TYPE_LISTEN_EVENT)
@@ -929,6 +1153,14 @@ class VoiceInputApp:
         self._print_permission_guidance_if_needed()
         if not getattr(self, "_accessibility_trusted", False):
             self._open_accessibility_settings()
+
+    def request_permissions(self):
+        """由首次启动向导触发，依次请求并打开两项键盘相关权限。"""
+        self._check_accessibility_permission(request_prompt=True)
+        if not getattr(self, "_accessibility_trusted", False):
+            self._open_accessibility_settings()
+        if not getattr(self, "_input_monitoring_trusted", False):
+            self._open_input_monitoring_settings()
 
     def refresh_accessibility_permission_status(self):
         """菜单打开时静默刷新权限状态，不主动弹出系统授权引导。"""
@@ -1324,6 +1556,8 @@ class VoiceInputApp:
         """按键按下事件（pynput 监听线程）：只做轻量检查并投递事件，重操作交给 DictationWorker。"""
         if self._paused:
             return
+        if self.pipeline is None:
+            return
         if key == self._hotkey_target():
             if self._pipeline_transitioning:
                 self._logger.info("按键按下忽略：后端重建中")
@@ -1372,10 +1606,14 @@ class VoiceInputApp:
     def _handle_press(self, trace):
         """worker：处理按键按下（开始录音等重操作）。"""
         self._current_trace = trace
-        if self.pipeline is not None:
-            self.pipeline.trace = trace
-            self.pipeline.audio_source.trace = trace
-            self.pipeline.model_engine.trace = trace
+        if self.pipeline is None:
+            self._current_trace = None
+            self._last_result = "请先在模型目录放入模型，并从菜单重新加载模型"
+            AppHelper.callAfter(self._refresh_status_bar_details)
+            return
+        self.pipeline.trace = trace
+        self.pipeline.audio_source.trace = trace
+        self.pipeline.model_engine.trace = trace
         if self._live_dictation is not None:
             self._live_dictation.trace = trace
         self._logger.info(
@@ -1420,6 +1658,9 @@ class VoiceInputApp:
     def _handle_release(self, trace):
         """worker：处理按键释放（停止录音、转录、粘贴等重操作）。"""
         self._current_trace = trace
+        if self.pipeline is None:
+            self._current_trace = None
+            return
         self._logger.info(
             "%s 按键释放上下文：paused=%s state=%s recording=%s pipeline_init=%s backend_released=%s live_dictation=%s dictation_mode=%s",
             trace.prefix("release") if trace else "[release]",
@@ -1457,18 +1698,26 @@ class VoiceInputApp:
             self._log_perf(result, trace)
             overflow = self.pipeline.audio_source.overflow
             if result.success:
+                no_speech = bool(getattr(result, "no_speech", False))
                 if self.settings.dictation_mode == "preview" and self._live_dictation is not None:
+                    # 预览收尾使用与 quick 模式相同的最终识别文本。
                     self._live_dictation.finalize(result.text)
                 self._logger.info(
-                    "%s stop_recording 完成：recording_duration=%.2fs processing_time=%.2fs rtf=%.2fx text_len=%s",
+                    "%s stop_recording 完成：no_speech=%s recording_duration=%.2fs processing_time=%.2fs rtf=%.2fx text_len=%s",
                     trace.prefix("stop_recording") if trace else "[stop_recording]",
+                    no_speech,
                     result.recording_duration,
                     result.processing_time,
                     result.rtf,
                     len(result.text or ""),
                 )
-                print(f"⏱️  录音：{result.recording_duration:.2f}秒 → ✅ {result.processing_time:.2f}秒 (RTF: {result.rtf:.2f}x)")
-                print(f"   「{result.text}」")
+                if no_speech:
+                    print(f"⏱️  录音：{result.recording_duration:.2f}秒 → ⚪ 未检测到语音")
+                    self._last_result = "未检测到语音"
+                else:
+                    print(f"⏱️  录音：{result.recording_duration:.2f}秒 → ✅ {result.processing_time:.2f}秒 (RTF: {result.rtf:.2f}x)")
+                    print(f"   「{result.text}」")
+                    self._last_result = result.text
                 if overflow:
                     print(f"   ⚠️ 已达最大录音时长 {self.settings.max_recording_seconds:.0f}s，超出部分已截断")
                     self._logger.warning(
@@ -1476,7 +1725,6 @@ class VoiceInputApp:
                         trace.prefix("stop_recording") if trace else "[stop_recording]",
                         self.settings.max_recording_seconds,
                     )
-                self._last_result = result.text
                 self._set_state("idle")
             else:
                 self._logger.info(
@@ -1533,6 +1781,29 @@ class VoiceInputApp:
             self._logger.warning("打开下载页失败：%s", e)
             print(f"❌ 打开下载页失败：{e}")
 
+    def reload_model(self):
+        """在首次放入模型后，从菜单栏加载当前选中的模型。"""
+        if self.pipeline is not None and self.pipeline.is_recording:
+            self._show_simple_alert("暂时无法加载模型", "请先结束当前录音。")
+            return
+
+        self._pipeline_transitioning = True
+        self._set_state("processing")
+        self._refresh_status_bar_details()
+        try:
+            if self._rebuild_pipeline():
+                self._last_result = f"已加载模型：{self.settings.current_model}"
+                print(f"🧠 已加载模型：{self.settings.current_model}")
+            else:
+                self._show_simple_alert(
+                    "模型尚未加载",
+                    f"找不到：{self.settings.get_model_path()}\n\n"
+                    "请先把 GGML 模型放入模型目录，再重试。",
+                )
+        finally:
+            self._pipeline_transitioning = False
+            self._refresh_status_bar_details()
+
     def _first_char_ms(self):
         """预览模式下首字延迟（ms）；非预览/未产生返回 None。"""
         if self._live_dictation is None:
@@ -1553,6 +1824,7 @@ class VoiceInputApp:
                 "processing_s": round(result.processing_time, 3),
                 "rtf": round(result.rtf, 3),
                 "text_len": len(result.text or ""),
+                "no_speech": bool(getattr(result, "no_speech", False)),
                 "first_char_ms": self._first_char_ms(),
                 "success": result.success,
             }
@@ -1677,8 +1949,6 @@ class VoiceInputApp:
         self._set_state("paused" if self._paused else "idle")
         self._refresh_status_bar_details()
         self._schedule_idle_release_timer()
-        self._print_permission_guidance_if_needed()
-
         # DictationWorker：串行执行录音启停等重操作，避免阻塞 pynput 按键监听线程
         self._dictation_queue = queue.Queue()
         self._dictation_worker = threading.Thread(
@@ -1697,10 +1967,16 @@ class VoiceInputApp:
         self._watchdog_thread.start()
 
         self._restart_keyboard_listener()
-        self._show_permission_repair_guidance()
 
         self._register_system_sleep_wake()
         self._start_signal_pump()
+
+        # 首次启动向导在事件循环准备好后弹出，避免阻塞初始化和热键监听。
+        AppHelper.callAfter(self.show_onboarding_if_needed)
+        # 权限 API 可能触发系统授权 UI，不能在进入 NSRunLoop 前同步调用；否则
+        # 首次启动会卡在权限请求，向导和菜单栏都无法出现。
+        AppHelper.callAfter(self._print_permission_guidance_if_needed)
+        AppHelper.callAfter(self._check_for_updates_if_due)
 
         app = AppKit.NSApplication.sharedApplication()
         app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
@@ -1711,7 +1987,10 @@ class VoiceInputApp:
         app.setDelegate_(self._term_delegate)
 
         self._logger.info("应用已启动，进入事件循环")
-        print("\n✅ 就绪，菜单栏图标已显示，按住右 Command 开始录音")
+        if self._model_setup_required:
+            print("\n⚠️  App 已启动，但尚未加载模型；请先放入模型并从菜单栏重新加载")
+        else:
+            print("\n✅ 就绪，菜单栏图标已显示，按住右 Command 开始录音")
         print("   使用菜单栏图标或 Ctrl+C 退出\n")
 
         AppHelper.runEventLoop()

@@ -14,6 +14,34 @@ def session():
     return LiveDictationSession(None, None, None, LiveDictationConfig())
 
 
+class _Clipboard:
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.calls = []
+
+    def replace_typed_text(self, new_text, previous_text):
+        self.calls.append((new_text, previous_text))
+        return self.ok
+
+
+def test_finalize_reports_insert_failure_and_keeps_rendered_text():
+    clipboard = _Clipboard(ok=False)
+    value = LiveDictationSession(None, None, clipboard, LiveDictationConfig())
+
+    assert value.finalize("最终文本") is False
+    assert value.rendered_text == ""
+
+
+def test_finalize_reports_success_and_is_idempotent():
+    clipboard = _Clipboard(ok=True)
+    value = LiveDictationSession(None, None, clipboard, LiveDictationConfig())
+
+    assert value.finalize("最终文本") is True
+    assert value.finalize("最终文本") is True
+    assert value.rendered_text == "最终文本"
+    assert clipboard.calls == [("最终文本", "")]
+
+
 # ---------------- _find_suffix_prefix_overlap ----------------
 
 class TestFindSuffixPrefixOverlap:

@@ -41,6 +41,19 @@ def test_startup_permission_guidance_prompts_when_permission_is_missing(monkeypa
     assert calls == [False, True]
 
 
+def test_input_monitoring_prompt_does_not_call_blocking_hid_api(monkeypatch):
+    """权限请求通过系统设置完成，不能同步阻塞 AppKit 主线程。"""
+    app = VoiceInputApp.__new__(VoiceInputApp)
+    called = []
+    monkeypatch.setattr(
+        "app.controller._IOHID_REQUEST_ACCESS",
+        lambda *_args: called.append(True),
+    )
+
+    assert app._has_input_monitoring_permission(prompt=True) is False
+    assert called == []
+
+
 def test_permission_transition_restarts_listener(monkeypatch):
     """授权发生在 App 已运行后，旧的未受信任 event tap 必须重建。"""
     app = VoiceInputApp.__new__(VoiceInputApp)

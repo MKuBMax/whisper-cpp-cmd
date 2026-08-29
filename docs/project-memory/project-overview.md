@@ -9,7 +9,7 @@ WhisperCppCmd 是一个 macOS 本地语音输入菜单栏 App，使用 Python + 
 3. 调用外部 whisper-cli 或 whisper-server 二进制转写。
 4. 在当前光标处插入文本，按 iTerm2 原生、CGEvent、System Events、AX 等路径逐级回退。
 5. 使用 OpenCC 做简繁归一。
-6. 写入 history.json。
+6. 经过保守的空录音保护后写入 history.json，并把性能记录追加到 perf.jsonl。
 
 模型位于 models/，当前包含 large-v3、large-v3-turbo 和 q5_0 等变体。
 
@@ -22,7 +22,9 @@ WhisperCppCmd 是一个 macOS 本地语音输入菜单栏 App，使用 Python + 
 - core/audio_source.py、core/audio_worker.py：采集客户端和隔离的音频 worker。
 - core/clipboard.py：剪贴板与文本插入。
 - core/live_dictation.py：实时预览。
-- core/output.py：输出持久化。
+- core/output.py：输出格式化、历史记录和日志。
+- core/audio_quality.py：VAD 之外的数字静音/无效采样检查。
+- core/stats.py、core/update_checker.py：统计汇总和 GitHub Release 更新检查。
 - config/settings.py：活配置。
 
 ## 硬约束
@@ -32,4 +34,3 @@ WhisperCppCmd 是一个 macOS 本地语音输入菜单栏 App，使用 Python + 
 - 优先最小、可回滚的改动。
 - 不为了不可能场景增加复杂错误处理。
 - 不引入强制云端 LLM、常驻麦克风或额外重依赖来解决局部问题。
-

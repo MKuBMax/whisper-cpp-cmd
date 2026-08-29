@@ -76,3 +76,42 @@ def test_transcription_prompt_style_only_when_no_glossary(tmp_path):
     s.glossary_file = str(tmp_path / "nope.txt")
     # 无术语表时只返回风格 prompt（与既有行为一致）
     assert s.get_transcription_prompt() == s.transcription_prompt.strip()
+
+
+def test_load_coerces_unsafe_boolean_and_numeric_values(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        "{"
+        '"update_check_enabled": "false", '
+        '"onboarding_completed": "false", '
+        '"n_threads": "not-a-number", '
+        '"auto_release_minutes": -4, '
+        '"current_model": "../outside"'
+        "}",
+        encoding="utf-8",
+    )
+
+    loaded = Settings.load(str(path))
+
+    assert loaded.update_check_enabled is False
+    assert loaded.onboarding_completed is False
+    assert loaded.n_threads == 8
+    assert loaded.auto_release_minutes == 0
+    assert loaded.current_model == "large-v3"
+    assert loaded.sample_rate == 16_000
+
+
+def test_sample_rate_remains_fixed_for_legacy_config(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"sample_rate": 48000}', encoding="utf-8")
+
+    assert Settings.load(str(path)).sample_rate == 16_000
+
+
+def test_save_creates_private_parent_and_uses_atomic_temp_files(tmp_path):
+    path = tmp_path / "nested" / "config.json"
+    Settings().save(str(path))
+
+    assert path.exists()
+    assert not list(path.parent.glob(".*.tmp-*"))
+    assert path.stat().st_mode & 0o777 == 0o600

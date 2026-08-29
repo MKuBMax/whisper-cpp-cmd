@@ -26,3 +26,11 @@ bash ship_app.sh
 
 代码改动完成后先 restart 让用户审核；用户确认后再提交；含代码提交完成后立即 ship。每次重启都要等待 10–15 秒，再检查进程和日志。
 
+## standalone 发布
+
+正式分发使用仓库根目录的 `VERSION` 和项目 `.venv-arm64/bin/python`，通过
+`bash package_app.sh` 生成 Apple Silicon standalone zip。默认使用 ad hoc
+签名；配置 `WHISPER_CPP_CMD_SIGNING_IDENTITY`、
+`WHISPER_CPP_CMD_NOTARY_PROFILE` 和 `WHISPER_CPP_CMD_NOTARIZE=true` 后才提交
+Developer ID notarization。更新 helper 位于 App 的 `Contents/Resources/update_app.sh`，
+只在 standalone 包中运行，并在当前 App 退出后执行替换和失败回滚。

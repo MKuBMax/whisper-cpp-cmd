@@ -2,12 +2,10 @@
 
 set -euo pipefail
 
-PROJECT_DIR="/Users/mkbm/work/app/whisper-cpp-cmd"
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="WhisperCppCmd"
 APP_PATH="$PROJECT_DIR/${APP_NAME}.app"
-ARM64_PYTHON="${ARM64_PYTHON:-/Users/mkbm/work/app/whisper-cpp-cmd/.venv-arm64/bin/python3}"
-CONDA_BIN="${CONDA_BIN:-/Users/mkbm/miniconda3/bin/conda}"
-ENV_NAME="${ENV_NAME:-voice-input}"
+ARM64_PYTHON="${WHISPER_CPP_CMD_PYTHON:-$PROJECT_DIR/.venv-arm64/bin/python}"
 
 ASSET_DIR="$PROJECT_DIR/.py2app-assets"
 BUILD_DIR="$PROJECT_DIR/.py2app-build"
@@ -43,16 +41,15 @@ fi
 
 cd "$PROJECT_DIR"
 
-if [ -x "$ARM64_PYTHON" ]; then
-    "$ARM64_PYTHON" setup.py py2app -A \
-        --dist-dir "$DIST_DIR" \
-        --bdist-base "$BUILD_DIR"
-else
-    "$CONDA_BIN" run --no-capture-output -n "$ENV_NAME" \
-        python3 setup.py py2app -A \
-        --dist-dir "$DIST_DIR" \
-        --bdist-base "$BUILD_DIR"
+if [ ! -x "$ARM64_PYTHON" ]; then
+    echo "❌ 找不到项目 Python：$ARM64_PYTHON" >&2
+    echo "   请先按项目开发环境安装 .venv-arm64 依赖。" >&2
+    exit 1
 fi
+
+"$ARM64_PYTHON" setup.py py2app -A \
+    --dist-dir "$DIST_DIR" \
+    --bdist-base "$BUILD_DIR"
 
 ditto "$DIST_DIR/$APP_NAME.app" "$APP_PATH"
 

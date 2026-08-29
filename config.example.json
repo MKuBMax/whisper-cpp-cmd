@@ -15,6 +15,8 @@
   "paste_delay": 0.03,
   "chinese_script": "simplified",
   "transcription_prompt": "请使用中文标点符号输出，句子尽量完整自然。",
+  "update_check_enabled": true,
+  "onboarding_completed": false,
   "history_max_entries": 100,
   "verbose": true
 }

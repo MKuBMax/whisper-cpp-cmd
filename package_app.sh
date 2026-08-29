@@ -5,11 +5,14 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="WhisperCppCmd"
-ARM64_PYTHON="$PROJECT_DIR/.venv-arm64/bin/python3"
+ARM64_PYTHON="${WHISPER_CPP_CMD_PYTHON:-$PROJECT_DIR/.venv-arm64/bin/python}"
 RELEASE_DIR="$PROJECT_DIR/release"
 PACKAGE_NAME="$APP_NAME-macOS-arm64"
 PACKAGE_DIR="$RELEASE_DIR/$PACKAGE_NAME"
 ZIP_PATH="$RELEASE_DIR/$PACKAGE_NAME.zip"
+SIGNING_IDENTITY="${WHISPER_CPP_CMD_SIGNING_IDENTITY:-}"
+NOTARY_PROFILE="${WHISPER_CPP_CMD_NOTARY_PROFILE:-}"
+NOTARIZE="${WHISPER_CPP_CMD_NOTARIZE:-false}"
 WORK_DIR="$(mktemp -d "/tmp/$APP_NAME.distribution.XXXXXX")"
 RUNTIME_SOURCE="$WORK_DIR/whisper-runtime"
 PY2APP_BUILD_DIR="$WORK_DIR/py2app-build"
@@ -25,6 +28,65 @@ cleanup() {
 }
 trap cleanup EXIT
 
+case "$NOTARIZE" in
+    true|TRUE|yes|YES|1)
+        if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "❌ 启用 notarization 前必须设置 WHISPER_CPP_CMD_SIGNING_IDENTITY。" >&2
+            exit 1
+        fi
+        if [ -z "$NOTARY_PROFILE" ]; then
+            echo "❌ 启用 notarization 前必须设置 WHISPER_CPP_CMD_NOTARY_PROFILE。" >&2
+            exit 1
+        fi
+        if ! command -v xcrun >/dev/null 2>&1; then
+            echo "❌ notarization 需要 Xcode Command Line Tools 的 xcrun。" >&2
+            exit 1
+        fi
+        if ! command -v spctl >/dev/null 2>&1; then
+            echo "❌ notarization 完成后的验收需要 spctl。" >&2
+            exit 1
+        fi
+        if ! xcrun notarytool help >/dev/null 2>&1; then
+            echo "❌ 当前 xcrun 不包含 notarytool。" >&2
+            exit 1
+        fi
+        ;;
+esac
+
+if ! command -v codesign >/dev/null 2>&1; then
+    echo "❌ standalone 分发包需要 codesign（Xcode Command Line Tools）。" >&2
+    exit 1
+fi
+if [ -n "$SIGNING_IDENTITY" ]; then
+    if ! command -v security >/dev/null 2>&1; then
+        echo "❌ Developer ID 签名需要 macOS security 工具。" >&2
+        exit 1
+    fi
+    if ! security find-identity -v -p codesigning 2>/dev/null \
+        | grep -Fq "\"$SIGNING_IDENTITY\""; then
+        echo "❌ 钥匙串中找不到指定的 codesigning identity：$SIGNING_IDENTITY" >&2
+        exit 1
+    fi
+fi
+
+sign_binary() {
+    local binary="$1"
+    if [ -n "$SIGNING_IDENTITY" ]; then
+        codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$binary"
+    else
+        codesign --force --sign - "$binary"
+    fi
+}
+
+sign_app() {
+    local app_path="$1"
+    if [ -n "$SIGNING_IDENTITY" ]; then
+        codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app_path"
+    else
+        codesign --force --deep --sign - "$app_path"
+    fi
+}
+
 if [ "$(uname -m)" != "arm64" ]; then
     echo "❌ 当前只构建 Apple Silicon 包（需要在 arm64 Mac 上运行）" >&2
     exit 1
@@ -34,6 +96,15 @@ if [ ! -x "$ARM64_PYTHON" ]; then
     echo "❌ 找不到项目 Python：$ARM64_PYTHON" >&2
     echo "   请先按项目开发环境安装依赖。" >&2
     exit 1
+fi
+
+if [ -n "${WHISPER_CPP_CMD_VERSION:-}" ]; then
+    if ! "$ARM64_PYTHON" -c \
+        'import re, sys; pattern = r"^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"; raise SystemExit(0 if re.fullmatch(pattern, sys.argv[1]) else 1)' \
+        "$WHISPER_CPP_CMD_VERSION"; then
+        echo "❌ WHISPER_CPP_CMD_VERSION 必须是三段 SemVer（例如 1.2.3-beta.1）。" >&2
+        exit 1
+    fi
 fi
 
 if ! command -v brew >/dev/null 2>&1; then
@@ -209,12 +280,21 @@ rm -rf "$RELEASE_DIR"
 mkdir -p "$PACKAGE_DIR"
 
 cd "$PROJECT_DIR"
-    "$ARM64_PYTHON" setup.py py2app \
+"$ARM64_PYTHON" setup.py py2app \
     --dist-dir "$PY2APP_DIST_DIR" \
     --bdist-base "$PY2APP_BUILD_DIR"
 
 ditto "$PY2APP_DIST_DIR/$APP_NAME.app" "$PACKAGE_DIR/$APP_NAME.app"
 FINAL_RUNTIME_DIR="$PACKAGE_DIR/$APP_NAME.app/Contents/Resources/whisper-runtime"
+# setup.py uses the same override for Info.plist, but the runtime reads the
+# bundled VERSION resource after py2app has detached it from this checkout.
+# Keep those two values identical when producing a release candidate with a
+# temporary version override.
+if [ -n "${WHISPER_CPP_CMD_VERSION:-}" ]; then
+    printf '%s\n' "$WHISPER_CPP_CMD_VERSION" \
+        >"$PACKAGE_DIR/$APP_NAME.app/Contents/Resources/VERSION"
+    chmod 644 "$PACKAGE_DIR/$APP_NAME.app/Contents/Resources/VERSION"
+fi
 # 在 py2app 完成 Mach-O 处理后再放入运行时，避免它改写运行时自己的依赖路径。
 ditto "$RUNTIME_SOURCE" "$FINAL_RUNTIME_DIR"
 cp "$PROJECT_DIR/distribution/README.md" "$PACKAGE_DIR/README.md"
@@ -232,8 +312,9 @@ if ! compgen -G "$BUNDLED_BACKEND_DIR/libggml-*.so" >/dev/null; then
     exit 1
 fi
 
-# 运行时 Mach-O 文件位于 Resources 下的自定义目录，codesign --deep 不会
-# 可靠地替它们逐个更新签名；先逐个 ad hoc 重签，再签 App 外层。
+# 运行时 Mach-O 文件位于 Resources 下的自定义目录，先逐个签名，再签 App
+# 外层。默认是 ad hoc 签名；设置 WHISPER_CPP_CMD_SIGNING_IDENTITY 后会使用
+# Developer ID Application 和 hardened runtime。
 for runtime_binary in \
     "$BUNDLED_CLI" \
     "$BUNDLED_SERVER" \
@@ -241,16 +322,16 @@ for runtime_binary in \
     "$BUNDLED_RUNTIME_DIR/lib/libomp.dylib" \
     "$BUNDLED_RUNTIME_DIR/ggml/lib/libggml.0.dylib" \
     "$BUNDLED_RUNTIME_DIR/ggml/lib/libggml-base.0.dylib"; do
-    codesign --force --sign - "$runtime_binary"
+    sign_binary "$runtime_binary"
 done
 for backend in "$BUNDLED_BACKEND_DIR"/libggml-*.so; do
-    codesign --force --sign - "$backend"
+    sign_binary "$backend"
 done
 
 # py2app 在复制 standalone 运行时之前已经签过 App；运行时文件又经过
 # install_name_tool 修改并被放入 App 后，必须在所有内容就位后重新签名，
 # 否则 CodeResources 会把这些文件识别为未封装资源。
-codesign --force --deep --sign - "$PACKAGE_DIR/$APP_NAME.app"
+sign_app "$PACKAGE_DIR/$APP_NAME.app"
 codesign --verify --deep --strict "$PACKAGE_DIR/$APP_NAME.app"
 
 for runtime_binary in \
@@ -310,10 +391,35 @@ done
 env -u GGML_BACKEND_PATH "$BUNDLED_CLI" --help >/dev/null 2>&1
 env -u GGML_BACKEND_PATH "$BUNDLED_SERVER" --help >/dev/null 2>&1
 
-ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_DIR" "$ZIP_PATH"
+# App 内的资源（包括 icns）本身已经是普通 bundle 文件；不保留 Finder
+# AppleDouble 元数据，避免 zip 中出现 __MACOSX 伪目录和重复的 App 结构。
+ditto -c -k --keepParent "$PACKAGE_DIR" "$ZIP_PATH"
+
+case "$NOTARIZE" in
+    true|TRUE|yes|YES|1)
+        echo "正在提交 Apple notarization..."
+        xcrun notarytool submit "$ZIP_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+        xcrun stapler staple "$PACKAGE_DIR/$APP_NAME.app"
+        xcrun stapler validate "$PACKAGE_DIR/$APP_NAME.app"
+        codesign --verify --deep --strict "$PACKAGE_DIR/$APP_NAME.app"
+        spctl --assess --type execute --verbose "$PACKAGE_DIR/$APP_NAME.app"
+        rm -f "$ZIP_PATH"
+        ditto -c -k --keepParent "$PACKAGE_DIR" "$ZIP_PATH"
+        ;;
+esac
 
 echo
 echo "✅ 已生成 standalone 分发包："
 echo "   App：$PACKAGE_DIR/$APP_NAME.app"
 echo "   Zip：$ZIP_PATH"
+if [ -n "$SIGNING_IDENTITY" ]; then
+    echo "   签名：Developer ID（$SIGNING_IDENTITY）"
+else
+    echo "   签名：ad hoc（未配置 Developer ID）"
+fi
+if [[ "$NOTARIZE" =~ ^(true|TRUE|yes|YES|1)$ ]]; then
+    echo "   公证：已提交并 stapled"
+else
+    echo "   公证：未启用"
+fi
 echo "   目标：Apple Silicon macOS；模型不随包提供"

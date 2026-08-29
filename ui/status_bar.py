@@ -61,6 +61,9 @@ class StatusBarController(NSObject):
         self.copy_last_result_item = None
         self.history_menu_item = None
         self.history_submenu = None
+        self.settings_item = None
+        self.stats_item = None
+        self.update_item = None
         self.icons = {}
         self._setup_status_item()
         return self
@@ -323,6 +326,27 @@ class StatusBarController(NSObject):
         )
         show_item.setTarget_(self)
 
+        self.settings_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
+            "打开设置…",
+            "openSettings:",
+            ""
+        )
+        self.settings_item.setTarget_(self)
+
+        self.stats_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
+            "统计面板…",
+            "showStats:",
+            ""
+        )
+        self.stats_item.setTarget_(self)
+
+        self.update_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
+            "检查更新…",
+            "checkForUpdates:",
+            ""
+        )
+        self.update_item.setTarget_(self)
+
         export_diagnostic_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
             "导出诊断报告",
             "exportDiagnostic:",
@@ -408,7 +432,7 @@ class StatusBarController(NSObject):
         self._append_model_actions()
 
     def _append_model_actions(self):
-        """在模型子菜单尾部追加「打开模型文件夹」「下载模型」动作项。"""
+        """在模型子菜单尾部追加模型目录、下载和重载动作项。"""
         self.model_submenu.addItem_(AppKit.NSMenuItem.separatorItem())
         folder_item = self.model_submenu.addItemWithTitle_action_keyEquivalent_(
             "在 Finder 中打开模型文件夹",
@@ -422,6 +446,12 @@ class StatusBarController(NSObject):
             "",
         )
         download_item.setTarget_(self)
+        reload_item = self.model_submenu.addItemWithTitle_action_keyEquivalent_(
+            "重新加载当前模型",
+            "reloadModel:",
+            "",
+        )
+        reload_item.setTarget_(self)
 
     def setMicOptions_(self, mic_payload):
         if self.mic_submenu is None:
@@ -653,6 +683,15 @@ class StatusBarController(NSObject):
     def exportDiagnostic_(self, sender):
         self.app.export_diagnostic_report()
 
+    def openSettings_(self, sender):
+        self.app.open_settings()
+
+    def showStats_(self, sender):
+        self.app.show_stats()
+
+    def checkForUpdates_(self, sender):
+        self.app.check_for_updates()
+
     def togglePause_(self, sender):
         self.app.toggle_pause()
 
@@ -707,6 +746,9 @@ class StatusBarController(NSObject):
 
     def openModelDownloadPage_(self, sender):
         self.app.open_model_download_page()
+
+    def reloadModel_(self, sender):
+        self.app.reload_model()
 
     def selectMic_(self, sender):
         value = sender.representedObject()

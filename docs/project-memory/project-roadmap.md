@@ -23,7 +23,7 @@ P2 中以下能力已经合并到 main：
 - 音频采集子进程隔离和自愈。
 - 录音 ducking。
 
-原路线中剩余的 C5 口语净化规则，需要在真正有需求和测试样本时再决定。
+识别准确率基础增强已落地：VAD 之外的数字静音/空输出保护。默认识别语言保持中文；需要多语言识别时由用户显式选择。置信度不会作为听写输出的拦截条件。
 
 ## 初版同事分发已完成
 
@@ -33,7 +33,14 @@ P2 中以下能力已经合并到 main：
 - whisper-cli、whisper-server 及其 arm64 动态库随 App 提供。
 - Whisper 模型不随包提供，由使用者自行下载到 ~/Library/Application Support/WhisperCppCmd/models/。
 - 配置、历史、术语表和日志写入用户 Library，不写入 .app。
-- 当前包未签名、未公证，只作为内部早期分发；构建目标暂限 Apple Silicon。
+- 默认测试包使用 ad hoc 签名，只作为内部早期分发；配置 Developer ID 和 notarization profile 后可构建正式签名公证包，构建目标暂限 Apple Silicon。
+- 更新安装只对 standalone 包开启：下载后的 GitHub zip 会做 HTTPS 主机、解压路径、App 结构和签名校验；当前 App 退出后由独立 helper 替换，保留 `.previous`，启动失败时保留 `.failed.*` 并恢复旧版本。
+
+## 发布体验已接入
+
+- 首次启动向导即使在模型尚未下载时也能显示；放入模型后可以从菜单栏重新加载。
+- 统计面板读取本地 perf.jsonl；更新检查只连接 GitHub Releases，默认每天后台检查一次，安装前验证更新包签名。
+- package_app.sh 默认生成 ad hoc 签名包，也支持通过 Developer ID identity、notarytool profile 和 `WHISPER_CPP_CMD_NOTARIZE=true` 构建签名公证包。
 
 ## 菜单栏开机启动已完成
 
@@ -51,10 +58,10 @@ P2 中以下能力已经合并到 main：
 
 ## 后续公开分发时再考虑
 
-- 签名、公证和完整构建管线。
-- macOS 原生通知、诊断和首启引导。
+- 完整 CI 构建管线和更新包发布自动化（不引入使用遥测）；本地 standalone 更新的失败回滚流程已经落地。
+- macOS 原生通知和更完整的发布自动化。
 - Intel/Universal 架构。
-- 自动更新和 npm/Brew 等渠道。
+- npm/Brew 等渠道。
 
 纯自用场景不需要为了分发提前做这些工作。
 
@@ -62,10 +69,9 @@ P2 中以下能力已经合并到 main：
 
 - CoreML：当前 whisper.cpp 构建链不支持且收益不明确。
 - 音频流式上传。
-- 强制 Ollama 或其他额外本地服务。
+- 强制额外本地服务。
 - 模型完整性魔数校验、磁盘满预检等低概率复杂防御。
 - 常驻 VAD 录音：会让麦克风指示灯常亮，违反按需激活。
 - 默认云端 LLM Polish。
 - 会议分离、双通道系统音频和多引擎维护。
-- 为零个真实 pass 提前搭建复杂的后处理链容器。
 - 模型微调：whisper.cpp 是推理引擎，不提供项目所需的微调链路。

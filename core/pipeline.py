@@ -16,6 +16,7 @@ from .model import ModelEngine, TranscriptionResult
 from .output import OutputHandler, OutputConfig, TextOutput
 from .clipboard import Clipboard, ClipboardConfig
 from .dictation_trace import DictationTrace
+from .audio_quality import analyze_audio
 
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ class PipelineResult:
     recording_duration: float = 0.0
     processing_time: float = 0.0
     rtf: float = 0.0
+    no_speech: bool = False
 
 
 class Pipeline:
@@ -82,7 +84,7 @@ class Pipeline:
         self.audio_source = AudioSource(self.config.audio)
         self.recorder = Recorder(
             sample_rate=self.config.audio.sample_rate,
-            min_duration=0.3
+            min_duration=0.3,
         )
         self.processor = Processor(self.config.processor)
         self.model_engine = ModelEngine()
@@ -141,7 +143,7 @@ class Pipeline:
             print(f"❌ 模型加载失败")
             logger.error("流水线初始化失败：模型加载失败")
             return False
-        
+
         load_time = time.time() - start
         print(f"✅ 模型加载完成 ({load_time:.2f}秒)")
         logger.info("流水线初始化完成：load_time=%.2fs", load_time)
@@ -173,7 +175,7 @@ class Pipeline:
     def _audio_callback(self, audio_chunk):
         """音频流数据回调 - 始终收集到音频源缓冲"""
         pass
-    
+
     def start_recording(self) -> bool:
         """开始录音"""
         if not self._is_initialized:
@@ -228,7 +230,33 @@ class Pipeline:
                 logger.warning("录音太短：%.2fs", duration)
                 return PipelineResult(
                     success=False,
-                    error=f"录音太短 ({duration:.2f}秒)"
+                    error=f"录音太短 ({duration:.2f}秒)",
+                    recording_duration=duration,
+                )
+
+            signal = analyze_audio(audio_data, self.config.audio.sample_rate)
+            if not signal.is_finite:
+                logger.warning("空录音保护：音频包含非有限采样值")
+                return PipelineResult(
+                    success=False,
+                    error="录音数据无效",
+                    recording_duration=duration,
+                    processing_time=time.time() - start_time,
+                )
+            if signal.is_digital_silence:
+                # 这是 VAD 之前的防线，只处理没有任何有效电平的录音；
+                # 不用置信度拦截正常的非空识别结果，也不误杀很轻的声音。
+                logger.info(
+                    "空录音保护：未检测到有效音频 peak=%.6f rms=%.6f duration=%.2fs",
+                    signal.peak,
+                    signal.rms,
+                    duration,
+                )
+                return PipelineResult(
+                    success=True,
+                    recording_duration=duration,
+                    processing_time=time.time() - start_time,
+                    no_speech=True,
                 )
             
             logger.info("开始预处理：duration=%.2fs samples=%s", duration, len(audio_data))
@@ -247,6 +275,7 @@ class Pipeline:
                 logger.info("%s transcribe done elapsed=%.2fs success=%s", trace.prefix("transcribe"), time.time() - transcribe_start, result.success)
             
             output_start = time.time()
+            raw_no_speech = result.success and not (result.text or "").strip()
             output = self.output_handler.process(
                 text=result.text,
                 model=result.model_name,
@@ -258,7 +287,7 @@ class Pipeline:
             if isinstance(trace, DictationTrace):
                 logger.info("%s output done elapsed=%.2fs", trace.prefix("output"), time.time() - output_start)
             
-            if result.success and paste_output and self.config.output.auto_paste:
+            if result.success and output.text and paste_output and self.config.output.auto_paste:
                 paste_start = time.time()
                 paste_ok = self.clipboard.insert(output.text)
                 logger.info("自动粘贴完成：ok=%s elapsed=%.2fs", paste_ok, time.time() - paste_start)
@@ -273,7 +302,8 @@ class Pipeline:
                 error=result.error if not result.success else None,
                 recording_duration=duration,
                 processing_time=total_time,
-                rtf=result.rtf
+                rtf=result.rtf,
+                no_speech=raw_no_speech,
             )
             
             if self._on_complete_callback:
