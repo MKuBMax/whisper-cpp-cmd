@@ -53,18 +53,18 @@ WhisperCppCmd 是一个本地优先的 macOS 菜单栏语音输入工具。
 
 ## 从源码构建
 
-本地开发和审核：
+本机 standalone 打包并审核（会替换 `/Applications` 中的 App）：
+
+```bash
+bash ship_app.sh
+```
+
+本机流程不使用 alias App。`ship_app.sh` 会调用 `build_app.sh`/`package_app.sh` 生成 standalone 包，替换 `/Applications/WhisperCppCmd.app` 并启动。
+
+只构建 standalone 分发包、不替换 `/Applications`：
 
 ```bash
 bash build_app.sh
-```
-
-这会生成仅适用于当前开发环境的 alias App，不适合直接分发。
-
-构建 standalone 分发包：
-
-```bash
-bash package_app.sh
 ```
 
 构建机需要 Apple Silicon、项目 `.venv-arm64`、Homebrew 的 `whisper-cpp`/`libomp`、CMake 和网络连接。生成的 zip 位于：

@@ -16,6 +16,6 @@
 
 ## 开发与部署工作流
 
-- 改完代码后用 `bash restart_app.sh` 重启 app 让用户审核（py2app alias 模式：`.app` 引用源码目录，重启即加载新代码——**仅审核阶段**无需重新打包）。
+- 改完代码后运行 `bash ship_app.sh`，用 standalone 包替换 `/Applications/WhisperCppCmd.app` 并重启让用户审核；本机打包流程不使用 alias App。
 - **重启后必须等待 10-15 秒**，再检查进程是否存活：`ps aux | grep "WhisperCppCmd.app/Contents/MacOS"`，并确认日志尾部出现「应用已启动，进入事件循环」。app 启动要加载模型、建 pipeline，过早检查会误判「重启成功」。
-- **每次含代码改动的 git 提交/合并都必须 `bash ship_app.sh`**（调 build_app.sh 重新打包 + 替换 `/Applications/WhisperCppCmd.app` + 重启）——即使 alias 模式重启已能读到新代码也**不可跳过**。**纯文档/非代码改动**（如本文件、README）的提交无需 ship。同样按上条等待 + 验证进程。
+- **每次含代码改动的 git 提交/合并都必须 `bash ship_app.sh`**（调用 `build_app.sh`/`package_app.sh` 构建 standalone 分发包 + 替换 `/Applications/WhisperCppCmd.app` + 重启）。**纯文档/非代码改动**（如本文件、README）的提交无需 ship。同样按上条等待 + 验证进程。

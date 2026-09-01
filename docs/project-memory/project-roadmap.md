@@ -25,6 +25,12 @@ P2 中以下能力已经合并到 main：
 
 识别准确率基础增强已落地：VAD 之外的数字静音/空输出保护。默认识别语言保持中文；需要多语言识别时由用户显式选择。置信度不会作为听写输出的拦截条件。
 
+## 当前待办
+
+- [x] 统一本机与分发打包流程：`build_app.sh`/`package_app.sh` 生成并验证
+  standalone App/zip，`ship_app.sh` 负责替换 `/Applications` 并重启；本机不再
+  保留或启动项目根目录的 alias App。
+
 ## 初版同事分发已完成
 
 当前基础分发目标是 Apple Silicon 同事之间共享 standalone zip：

@@ -285,7 +285,39 @@ cd "$PROJECT_DIR"
     --bdist-base "$PY2APP_BUILD_DIR"
 
 ditto "$PY2APP_DIST_DIR/$APP_NAME.app" "$PACKAGE_DIR/$APP_NAME.app"
-FINAL_RUNTIME_DIR="$PACKAGE_DIR/$APP_NAME.app/Contents/Resources/whisper-runtime"
+FINAL_APP="$PACKAGE_DIR/$APP_NAME.app"
+
+# 保证正式分发不会悄悄退化成 alias 包。alias 包会把 Python 和源码路径
+# 写入 bundle；它只能在当前 checkout 上运行，不能交给其他电脑。
+BUNDLE_ALIAS="$(/usr/libexec/PlistBuddy -c 'Print :PyOptions:alias' \
+    "$FINAL_APP/Contents/Info.plist" 2>/dev/null || true)"
+if [ "$BUNDLE_ALIAS" != "false" ]; then
+    echo "❌ py2app 没有生成 standalone App（PyOptions:alias=$BUNDLE_ALIAS）。" >&2
+    echo "   正式分发构建不能使用 py2app -A。" >&2
+    exit 1
+fi
+if [ ! -d "$FINAL_APP/Contents/Frameworks/Python.framework" ]; then
+    echo "❌ standalone App 缺少内置 Python.framework。" >&2
+    exit 1
+fi
+if [ ! -d "$FINAL_APP/Contents/Resources/lib" ]; then
+    echo "❌ standalone App 缺少内置 Python 资源目录。" >&2
+    exit 1
+fi
+
+# standalone 可以保留 Python framework 内部的相对链接，但不能引用当前
+# checkout 或其虚拟环境；否则换到其他电脑仍然会退化成 alias。
+while IFS= read -r -d '' link; do
+    link_target="$(readlink "$link")"
+    case "$link_target" in
+        "$PROJECT_DIR"|"$PROJECT_DIR"/*|"$ARM64_PYTHON"|"$ARM64_PYTHON"/*)
+            echo "❌ standalone App 仍包含指向项目环境的链接：$link -> $link_target" >&2
+            exit 1
+            ;;
+    esac
+done < <(find "$FINAL_APP" -type l -print0)
+
+FINAL_RUNTIME_DIR="$FINAL_APP/Contents/Resources/whisper-runtime"
 # setup.py uses the same override for Info.plist, but the runtime reads the
 # bundled VERSION resource after py2app has detached it from this checkout.
 # Keep those two values identical when producing a release candidate with a
@@ -331,8 +363,8 @@ done
 # py2app 在复制 standalone 运行时之前已经签过 App；运行时文件又经过
 # install_name_tool 修改并被放入 App 后，必须在所有内容就位后重新签名，
 # 否则 CodeResources 会把这些文件识别为未封装资源。
-sign_app "$PACKAGE_DIR/$APP_NAME.app"
-codesign --verify --deep --strict "$PACKAGE_DIR/$APP_NAME.app"
+sign_app "$FINAL_APP"
+codesign --verify --deep --strict "$FINAL_APP"
 
 for runtime_binary in \
     "$BUNDLED_CLI" \
@@ -391,9 +423,14 @@ done
 env -u GGML_BACKEND_PATH "$BUNDLED_CLI" --help >/dev/null 2>&1
 env -u GGML_BACKEND_PATH "$BUNDLED_SERVER" --help >/dev/null 2>&1
 
-# App 内的资源（包括 icns）本身已经是普通 bundle 文件；不保留 Finder
-# AppleDouble 元数据，避免 zip 中出现 __MACOSX 伪目录和重复的 App 结构。
-ditto -c -k --keepParent "$PACKAGE_DIR" "$ZIP_PATH"
+# App 内的资源（包括 icns）本身已经是普通 bundle 文件；不把扩展属性、
+# quarantine/resource fork 打进 zip，避免分发包出现 Finder AppleDouble 的
+# `._*` 文件或 `__MACOSX` 伪目录。
+ditto -c -k --norsrc --noextattr --noqtn --keepParent "$PACKAGE_DIR" "$ZIP_PATH"
+if unzip -Z1 "$ZIP_PATH" | grep -Eq '(^|/)(\._|__MACOSX/)'; then
+    echo "❌ 分发 zip 包含 Finder AppleDouble 元数据：$ZIP_PATH" >&2
+    exit 1
+fi
 
 case "$NOTARIZE" in
     true|TRUE|yes|YES|1)
