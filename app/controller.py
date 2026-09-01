@@ -1980,6 +1980,11 @@ class VoiceInputApp:
 
         app = AppKit.NSApplication.sharedApplication()
         app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+        # Changing the activation policy can make an NSStatusItem lose its
+        # visible frame on newer macOS versions.  Keep the diagnostic entry
+        # visible even when privacy permissions are missing.
+        if self.status_bar is not None:
+            self.status_bar.ensure_visible()
 
         # 防线2b：注册终止委托，兜住 Cmd+Q / 关机 / 注销（否则绕过 shutdown 留下孤儿 server）
         self._term_delegate = _TerminationDelegate.alloc().init()

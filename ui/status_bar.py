@@ -13,6 +13,10 @@ from config.paths import resource_path
 from core import login_item
 
 
+_STATUS_ITEM_LENGTH = 22.0
+_STATUS_ICON_SIZE = 16.0
+
+
 class StatusBarController(NSObject):
     """macOS 菜单栏控制器"""
 
@@ -70,11 +74,21 @@ class StatusBarController(NSObject):
 
     def _setup_status_item(self):
         self.status_item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(
-            AppKit.NSVariableStatusItemLength
+            _STATUS_ITEM_LENGTH
         )
         self.status_item.setHighlightMode_(True)
+        # Explicitly keep a real slot in the menu bar.  A variable-length item
+        # can be represented by Accessibility while having no visible frame on
+        # newer macOS versions, especially after the app's activation policy or
+        # privacy state changes.
+        self.status_item.setVisible_(True)
 
         button = self.status_item.button()
+        button.setHidden_(False)
+        button.setEnabled_(True)
+        button.setImagePosition_(AppKit.NSImageOnly)
+        button.setImageScaling_(AppKit.NSImageScaleProportionallyDown)
+        button.setFrameSize_(AppKit.NSMakeSize(_STATUS_ITEM_LENGTH, _STATUS_ITEM_LENGTH))
         button.setToolTip_("语音输入运行中")
 
         self._load_icons()
@@ -397,8 +411,21 @@ class StatusBarController(NSObject):
             image = AppKit.NSImage.alloc().initByReferencingFile_(path)
             if image:
                 image.setTemplate_(True)
-                image.setSize_(AppKit.NSMakeSize(16, 16))
+                image.setSize_(AppKit.NSMakeSize(_STATUS_ICON_SIZE, _STATUS_ICON_SIZE))
                 self.icons[state] = image
+
+    @objc.python_method
+    def ensure_visible(self):
+        """Reassert visibility after NSApplication changes activation policy."""
+        if self.status_item is None:
+            return
+        self.status_item.setLength_(_STATUS_ITEM_LENGTH)
+        self.status_item.setVisible_(True)
+        button = self.status_item.button()
+        if button is not None:
+            button.setHidden_(False)
+            button.setEnabled_(True)
+            button.setFrameSize_(AppKit.NSMakeSize(_STATUS_ITEM_LENGTH, _STATUS_ITEM_LENGTH))
 
     def setState_(self, state):
         state_text = {
