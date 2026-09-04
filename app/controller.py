@@ -11,6 +11,7 @@ import logging
 import os
 import subprocess
 import ctypes
+from contextlib import contextmanager
 from datetime import datetime
 
 from pynput import keyboard
@@ -53,10 +54,73 @@ _INPUT_MONITORING_SETTINGS_URLS = (
     # macOS 12 及更早版本，以及部分系统升级后的兼容 URL。
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
 )
+_MICROPHONE_SETTINGS_URLS = (
+    "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone",
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+)
 _ACCESSIBILITY_SETTINGS_URLS = (
     "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
 )
+
+# AVAudioApplication/AVAudioSession use four-character enum values on macOS.
+# Keep the numeric 2 fallback for older bindings that expose the enum as 0/1/2.
+_AUDIO_RECORD_PERMISSION_GRANTED = int.from_bytes(b"grnt", "big")
+_AUDIO_RECORD_PERMISSION_UNDETERMINED = int.from_bytes(b"undt", "big")
+
+# 本项目通过 Objective-C runtime 动态取得 AVFAudio 类，没有安装
+# pyobjc-framework-AVFAudio，因此 PyObjC 不会自带这个 block 的元数据。
+# requestRecordPermissionWithCompletionHandler: 的回调是 void (^)(BOOL)。
+_AUDIO_PERMISSION_REQUEST_METADATA = {
+    "arguments": {
+        2: {
+            "callable": {
+                "retval": {"type": b"v"},
+                "arguments": {
+                    0: {"type": b"^v"},
+                    1: {"type": b"Z"},
+                },
+            },
+        },
+    },
+}
+
+
+@contextmanager
+def _empty_pynput_keycode_context():
+    """跳过 Darwin listener 启动时不必要的 Carbon 键盘布局查询。
+
+    pynput 的 macOS listener 在后台线程初始化时会调用
+    ``TISCopyCurrentKeyboardInputSource``。macOS 26 要求这条输入源查询在
+    主线程/指定队列上执行，后台调用会触发 ``dispatch_assert_queue_fail``
+    直接终止整个 App。listener 自己处理事件时使用
+    ``CGEventKeyboardGetUnicodeString``，不会读取这个 context，因此空 context
+    不影响当前的按键识别。
+    """
+    yield (None, None)
+
+
+def _new_keyboard_listener(**callbacks):
+    """创建不会触发 macOS 26 Carbon 后台线程断言的键盘 listener。"""
+    listener_class = keyboard.Listener
+    if sys.platform != "darwin" or listener_class.__module__ != "pynput.keyboard._darwin":
+        return listener_class(**callbacks)
+
+    class SafeDarwinKeyboardListener(listener_class):
+        def _run(self):
+            # ``pynput.keyboard._darwin.Listener._run`` 通过模块级名称查找
+            # keycode_context；仅在这个 listener 的线程生命周期内替换它。
+            import importlib
+
+            darwin_module = importlib.import_module("pynput.keyboard._darwin")
+            original_context = darwin_module.keycode_context
+            darwin_module.keycode_context = _empty_pynput_keycode_context
+            try:
+                return super()._run()
+            finally:
+                darwin_module.keycode_context = original_context
+
+    return SafeDarwinKeyboardListener(**callbacks)
 
 from config.settings import Settings
 from config.paths import (
@@ -260,7 +324,12 @@ class VoiceInputApp:
         elif not self._create_pipeline():
             return False
 
-        AppKit.NSApplication.sharedApplication()
+        ns_app = AppKit.NSApplication.sharedApplication()
+        # Set the final activation policy before creating NSStatusItem.  The
+        # previous order created the item while the app was still regular and
+        # changed to accessory only after all UI was built; macOS 26 can then
+        # leave the item's window outside the menu bar after relayout.
+        ns_app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
         self.status_bar = StatusBarController.alloc().initWithApp_(self)
         try:
             self._overlay = RecordingOverlay.alloc().init()
@@ -445,9 +514,25 @@ class VoiceInputApp:
             self._stats_window = StatsWindowController.alloc().initWithApp_(self)
         self._stats_window.show()
 
+    def open_onboarding(self) -> None:
+        """手动打开欢迎与权限向导窗口。"""
+        if self._onboarding_window is None:
+            self._onboarding_window = OnboardingWindowController.alloc().initWithApp_(self)
+        self._onboarding_window.show()
+
     def show_onboarding_if_needed(self) -> None:
-        if self.settings.onboarding_completed:
+        # 即使用户之前点过完成，只要核心权限后来因替换 App 而失效，也重新
+        # 打开同一个常驻向导；不再用一次性的权限 Alert 打断用户。
+        self._check_accessibility_permission()
+        permissions = self.get_permission_status()
+        if self.settings.onboarding_completed and all(
+            permissions.get(key, False) for key in ("microphone", "accessibility")
+        ):
             return
+        # 允许测试/恢复路径使用未完整初始化的轻量控制器对象。
+        getattr(self, "_logger", logging.getLogger(__name__)).info(
+            "显示常驻欢迎页：permissions=%s", permissions
+        )
         if self._onboarding_window is None:
             self._onboarding_window = OnboardingWindowController.alloc().initWithApp_(self)
         self._onboarding_window.show()
@@ -910,6 +995,89 @@ class VoiceInputApp:
             self._logger.warning("检查输入监控权限失败：%s", exc)
             return False
 
+    def _audio_permission_class(self):
+        """返回可读取麦克风授权状态的 AVAudio 类。"""
+        for class_name in ("AVAudioApplication", "AVAudioSession"):
+            try:
+                audio_class = objc.lookUpClass(class_name)
+                shared = getattr(audio_class, "sharedInstance", None)
+                if shared is not None:
+                    return class_name, audio_class
+            except Exception:
+                continue
+        return None
+
+    def _audio_permission_object(self):
+        """返回可读取麦克风授权状态的 AVAudio 对象。"""
+        audio_info = self._audio_permission_class()
+        if audio_info is None:
+            return None
+        _, audio_class = audio_info
+        try:
+            return audio_class.sharedInstance()
+        except Exception:
+            return None
+
+    def _microphone_permission_value(self):
+        audio_object = self._audio_permission_object()
+        if audio_object is None:
+            self._logger.warning("AVAudio 权限 API 不可用，无法确认麦克风权限")
+            return None
+        try:
+            record_permission = getattr(audio_object, "recordPermission", None)
+            value = record_permission() if callable(record_permission) else record_permission
+            return int(value)
+        except Exception as exc:
+            self._logger.warning("检查麦克风权限失败：%s", exc)
+            return None
+
+    def _has_microphone_permission(self) -> bool:
+        """静默检查当前 App 的麦克风权限。"""
+        value = self._microphone_permission_value()
+        return value in {_AUDIO_RECORD_PERMISSION_GRANTED, 2}
+
+    def _request_microphone_permission(self) -> bool:
+        """请求麦克风权限；页面保持打开，由回调触发状态刷新。"""
+        value = self._microphone_permission_value()
+        if value in {_AUDIO_RECORD_PERMISSION_GRANTED, 2}:
+            return True
+
+        audio_info = self._audio_permission_class()
+        audio_class = audio_info[1] if audio_info is not None else None
+        if audio_info is not None and audio_info[0] == "AVAudioApplication":
+            # 动态 runtime 类没有 AVFAudio 的 PyObjC metadata；补上 block
+            # 签名，否则会在真实 App 中抛出 “block, but no signature available”。
+            try:
+                objc.registerMetaDataForSelector(
+                    b"AVAudioApplication",
+                    b"requestRecordPermissionWithCompletionHandler:",
+                    _AUDIO_PERMISSION_REQUEST_METADATA,
+                )
+            except Exception:
+                self._logger.exception("注册 AVAudio 麦克风授权回调签名失败")
+
+        request = getattr(audio_class, "requestRecordPermissionWithCompletionHandler_", None)
+        if audio_class is not None and request is not None and value in {
+            _AUDIO_RECORD_PERMISSION_UNDETERMINED,
+            0,
+        }:
+            def completed(_granted):
+                self._microphone_permission_callback = None
+                AppHelper.callAfter(self.refresh_accessibility_permission_status)
+
+            try:
+                # 这是 AVAudioApplication 的类方法，不能从 sharedInstance
+                # 返回的实例上调用。
+                self._microphone_permission_callback = completed
+                request(completed)
+                self._logger.info("请求 macOS 麦克风授权")
+                return False
+            except Exception:
+                self._logger.exception("请求 macOS 麦克风授权失败")
+
+        self._open_microphone_settings()
+        return False
+
     def _open_privacy_settings(self, urls, label: str) -> bool:
         """打开指定的系统隐私页面，作为系统请求无 UI 时的兜底。"""
         workspace = AppKit.NSWorkspace.sharedWorkspace()
@@ -928,9 +1096,35 @@ class VoiceInputApp:
         """打开系统设置的“输入监控”页面。"""
         return self._open_privacy_settings(_INPUT_MONITORING_SETTINGS_URLS, "输入监控")
 
+    def _open_microphone_settings(self) -> bool:
+        """打开系统设置的“麦克风”页面。"""
+        return self._open_privacy_settings(_MICROPHONE_SETTINGS_URLS, "麦克风")
+
     def _open_accessibility_settings(self) -> bool:
         """打开系统设置的“辅助功能”页面。"""
         return self._open_privacy_settings(_ACCESSIBILITY_SETTINGS_URLS, "辅助功能")
+
+    def get_permission_status(self) -> dict[str, bool]:
+        """返回欢迎页使用的实时权限状态。"""
+        return {
+            "microphone": self._has_microphone_permission(),
+            "accessibility": bool(getattr(self, "_accessibility_trusted", False)),
+            "input_monitoring": bool(getattr(self, "_input_monitoring_trusted", False)),
+        }
+
+    def request_permission(self, permission: str) -> bool:
+        """从欢迎页的单个权限行发起请求，不弹出一次性 App Alert。"""
+        permission = str(permission or "")
+        if permission == "microphone":
+            return self._request_microphone_permission()
+        if permission == "accessibility":
+            self._check_accessibility_permission(request_prompt=True)
+            if not getattr(self, "_accessibility_trusted", False):
+                self._open_accessibility_settings()
+            return bool(getattr(self, "_accessibility_trusted", False))
+        if permission == "input_monitoring":
+            return self.check_input_monitoring_permission()
+        return False
 
     def check_input_monitoring_permission(self):
         """由菜单栏“输入监控权限”项触发请求，并在必要时打开系统设置。"""
@@ -974,7 +1168,7 @@ class VoiceInputApp:
         return "当前正在运行的 WhisperCppCmd.app"
 
     def _show_permission_repair_guidance(self) -> None:
-        """权限/监听器异常时给出一次明确的用户操作说明。"""
+        """记录权限异常，由常驻欢迎页展示，不再弹出一次性对话框。"""
         if not getattr(self, "_is_running", False):
             return
 
@@ -1001,28 +1195,13 @@ class VoiceInputApp:
         if alert_key == self._permission_repair_alert_key:
             return
         self._permission_repair_alert_key = alert_key
-
-        alert = AppKit.NSAlert.alloc().init()
-        alert.setMessageText_("WhisperCppCmd 需要重新整理权限")
-        alert.setInformativeText_(
-            "检测到以下状态异常：%s。\n\n"
-            "请按下面步骤处理：\n"
-            "1. 打开“系统设置 → 隐私与安全性 → 辅助功能”，删除列表中指向旧版本的 WhisperCppCmd.app 条目。\n"
-            "2. 打开“输入监控”，同样删除指向旧版本的条目。\n"
-            "3. 点击“+”，重新添加当前 App：\n%s\n"
-            "4. 在两个页面都打开权限开关。\n"
-            "5. 回到 App，等待权限状态自动重新检查；如果仍未恢复，再重新打开当前 App。\n\n"
-            "只处理 WhisperCppCmd 的旧条目，不要删除其他应用。App 不会自动删除或修改系统权限。"
-            % ("、".join(missing), self._current_app_bundle_path())
+        self._logger.info(
+            "权限状态待处理：%s；由常驻欢迎页显示，当前不弹出一次性对话框",
+            "、".join(missing),
         )
-        alert.addButtonWithTitle_("打开权限设置")
-        alert.addButtonWithTitle_("稍后处理")
-        response = alert.runModal()
-        if response == AppKit.NSAlertFirstButtonReturn:
-            if not getattr(self, "_accessibility_trusted", False):
-                self._open_accessibility_settings()
-            else:
-                self._open_input_monitoring_settings()
+        onboarding = getattr(self, "_onboarding_window", None)
+        if onboarding is not None:
+            onboarding.update_permission_status(self.get_permission_status())
 
     def _stop_keyboard_listener(self):
         previous = self.listener
@@ -1057,7 +1236,10 @@ class VoiceInputApp:
 
         self._stop_keyboard_listener()
 
-        self.listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
+        self.listener = _new_keyboard_listener(
+            on_press=self._on_press,
+            on_release=self._on_release,
+        )
         self.listener.start()
         try:
             # 等待 pynput 完成 CGEventTap 初始化，再记录真实状态；仅看
@@ -1122,8 +1304,8 @@ class VoiceInputApp:
         return trusted
 
     def _print_permission_guidance_if_needed(self):
-        # 每次启动都先做一次静默检查。只有当前进程确实未获授权时，才请求
-        # macOS 展示一次系统授权引导；已经授权时不会弹窗。
+        # 每次启动都做静默检查。权限引导由常驻欢迎页负责，不再额外弹出
+        # 一次性 App Alert 或触发“前往后结束”的临时流程。
         trusted = self._check_accessibility_permission()
         if trusted:
             return
@@ -1132,12 +1314,6 @@ class VoiceInputApp:
             self._logger.warning("缺少辅助功能权限：右 Command 热键监听将不可用")
         if not self._input_monitoring_trusted:
             self._logger.info("输入监控尚未单独授权：当前右 Command 监听仍由辅助功能权限提供")
-        if self._check_accessibility_permission(
-            request_prompt=True,
-            trusted=self._accessibility_trusted,
-        ):
-            self._logger.info("键盘监听所需权限已获得")
-            return
 
         if not self._accessibility_trusted:
             print("⚠️  当前 App 未获得辅助功能权限，右 Command 热键不会生效")
@@ -1145,26 +1321,25 @@ class VoiceInputApp:
             print("   请在「系统设置 → 隐私与安全性 → 辅助功能」允许 WhisperCppCmd.app")
         if not self._input_monitoring_trusted:
             print("   可在「系统设置 → 隐私与安全性 → 输入监控」单独允许 WhisperCppCmd.app")
-        print("   辅助功能授权完成后无需重启，App 会自动重建全局热键监听器")
-        self._show_permission_repair_guidance()
+        print("   请在欢迎页点击对应权限行的“打开设置”；授权后页面会自动刷新")
 
     def check_accessibility_permission(self):
-        """由菜单栏状态项触发：重新检查并请求系统授权引导。"""
-        self._print_permission_guidance_if_needed()
-        if not getattr(self, "_accessibility_trusted", False):
-            self._open_accessibility_settings()
+        """由菜单栏状态项触发：重新检查并打开系统授权页面。"""
+        return self.request_permission("accessibility")
 
     def request_permissions(self):
-        """由首次启动向导触发，依次请求并打开两项键盘相关权限。"""
-        self._check_accessibility_permission(request_prompt=True)
-        if not getattr(self, "_accessibility_trusted", False):
-            self._open_accessibility_settings()
-        if not getattr(self, "_input_monitoring_trusted", False):
-            self._open_input_monitoring_settings()
+        """兼容旧调用：请求全部权限，页面本身保持打开并持续刷新。"""
+        self.request_permission("microphone")
+        self.request_permission("accessibility")
+        self.request_permission("input_monitoring")
+        self.refresh_accessibility_permission_status()
 
     def refresh_accessibility_permission_status(self):
         """菜单打开时静默刷新权限状态，不主动弹出系统授权引导。"""
         self._check_accessibility_permission()
+        onboarding = getattr(self, "_onboarding_window", None)
+        if onboarding is not None:
+            onboarding.update_permission_status(self.get_permission_status())
 
     def _schedule_error_reset(self):
         self._error_reset_timer = threading.Timer(1.5, self._reset_error_state_if_needed)
@@ -1980,11 +2155,9 @@ class VoiceInputApp:
 
         app = AppKit.NSApplication.sharedApplication()
         app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
-        # Changing the activation policy can make an NSStatusItem lose its
-        # visible frame on newer macOS versions.  Keep the diagnostic entry
-        # visible even when privacy permissions are missing.
+        # Reassert after the event loop is fully wired and record diagnostics.
         if self.status_bar is not None:
-            self.status_bar.ensure_visible()
+            self.refresh_status_bar_health()
 
         # 防线2b：注册终止委托，兜住 Cmd+Q / 关机 / 注销（否则绕过 shutdown 留下孤儿 server）
         self._term_delegate = _TerminationDelegate.alloc().init()
@@ -1999,6 +2172,13 @@ class VoiceInputApp:
         print("   使用菜单栏图标或 Ctrl+C 退出\n")
 
         AppHelper.runEventLoop()
+
+    def refresh_status_bar_health(self):
+        """Keep the menu item configured and record its actual screen health."""
+        status_bar = getattr(self, "status_bar", None)
+        if status_bar is None:
+            return None
+        return status_bar.ensure_visible()
 
     def shutdown(self):
         """关闭应用（atexit / signal / NSApplicationDelegate 三入口，幂等 + 锁防并发重入）"""

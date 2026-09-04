@@ -1,7 +1,10 @@
-"""键盘监听权限检查：辅助功能与输入监控分别检查，缺失时请求引导。"""
+"""权限检查：状态持续刷新，缺失时由欢迎页提供引导。"""
 
 import logging
+import sys
+import types
 
+from app import controller
 from app.controller import VoiceInputApp
 
 
@@ -38,7 +41,97 @@ def test_startup_permission_guidance_prompts_when_permission_is_missing(monkeypa
 
     app._print_permission_guidance_if_needed()
 
-    assert calls == [False, True]
+    assert calls == [False]
+
+
+def test_microphone_permission_reads_av_audio_application(monkeypatch):
+    app = VoiceInputApp.__new__(VoiceInputApp)
+    app._logger = logging.getLogger(__name__)
+
+    class FakeAudioApplication:
+        @staticmethod
+        def sharedInstance():
+            return FakeAudioApplication
+
+        @staticmethod
+        def recordPermission():
+            return int.from_bytes(b"grnt", "big")
+
+    monkeypatch.setattr(
+        "app.controller.objc.lookUpClass",
+        lambda name: FakeAudioApplication if name == "AVAudioApplication" else (_ for _ in ()).throw(AssertionError(name)),
+    )
+
+    assert app._has_microphone_permission() is True
+
+
+def test_microphone_permission_request_uses_class_method_with_block_metadata(monkeypatch):
+    app = VoiceInputApp.__new__(VoiceInputApp)
+    app._logger = logging.getLogger(__name__)
+    app.refresh_accessibility_permission_status = lambda: None
+    callbacks = []
+    metadata = []
+    refreshed = []
+
+    class FakeAudioApplication:
+        @classmethod
+        def sharedInstance(cls):
+            return cls
+
+        @classmethod
+        def recordPermission(cls):
+            return int.from_bytes(b"undt", "big")
+
+        @classmethod
+        def requestRecordPermissionWithCompletionHandler_(cls, callback):
+            callbacks.append(callback)
+
+    monkeypatch.setattr(
+        "app.controller.objc.lookUpClass",
+        lambda name: FakeAudioApplication if name == "AVAudioApplication" else (_ for _ in ()).throw(AssertionError(name)),
+    )
+    monkeypatch.setattr(
+        "app.controller.objc.registerMetaDataForSelector",
+        lambda *args: metadata.append(args),
+    )
+    monkeypatch.setattr(
+        "app.controller.AppHelper.callAfter",
+        lambda callback: (refreshed.append(True), callback()),
+    )
+
+    assert app._request_microphone_permission() is False
+    assert len(callbacks) == 1
+    assert metadata and metadata[0][0:2] == (
+        b"AVAudioApplication",
+        b"requestRecordPermissionWithCompletionHandler:",
+    )
+
+    callbacks[0](True)
+    assert refreshed == [True]
+
+
+def test_darwin_listener_skips_background_carbon_layout_lookup(monkeypatch):
+    original_context = object()
+    observed_contexts = []
+    fake_darwin_module = types.SimpleNamespace(keycode_context=original_context)
+
+    class FakeListener:
+        def __init__(self, **_callbacks):
+            pass
+
+        def _run(self):
+            observed_contexts.append(fake_darwin_module.keycode_context)
+
+    FakeListener.__module__ = "pynput.keyboard._darwin"
+    monkeypatch.setattr(controller.sys, "platform", "darwin")
+    monkeypatch.setattr(controller.keyboard, "Listener", FakeListener)
+    monkeypatch.setitem(sys.modules, "pynput.keyboard._darwin", fake_darwin_module)
+
+    listener = controller._new_keyboard_listener()
+    listener._run()
+
+    assert observed_contexts == [controller._empty_pynput_keycode_context]
+    assert fake_darwin_module.keycode_context is original_context
 
 
 def test_input_monitoring_prompt_does_not_call_blocking_hid_api(monkeypatch):
@@ -121,7 +214,7 @@ def test_input_monitoring_action_opens_settings_when_request_has_no_ui(monkeypat
     assert opened == [True]
 
 
-def test_permission_guidance_describes_manual_cleanup(monkeypatch):
+def test_permission_repair_guidance_does_not_show_modal_alert(monkeypatch, caplog):
     app = VoiceInputApp.__new__(VoiceInputApp)
     app._logger = logging.getLogger(__name__)
     app._is_running = True
@@ -129,40 +222,86 @@ def test_permission_guidance_describes_manual_cleanup(monkeypatch):
     app._input_monitoring_trusted = False
     app.listener = None
     app._permission_repair_alert_key = None
-    app._current_app_bundle_path = lambda: "/Applications/WhisperCppCmd.app"
-    opened = []
+    class ExplodingAlertFactory:
+        def __call__(self, *_args, **_kwargs):
+            raise AssertionError("权限异常不应再创建一次性 NSAlert")
 
-    class FakeAlert:
-        message = None
-        information = None
+    monkeypatch.setattr("app.controller.AppKit.NSAlert", ExplodingAlertFactory())
 
-        def init(self):
+    with caplog.at_level(logging.INFO):
+        app._show_permission_repair_guidance()
+
+    assert "常驻欢迎页" in caplog.text
+
+
+def test_onboarding_reopens_when_core_permission_is_missing(monkeypatch):
+    app = VoiceInputApp.__new__(VoiceInputApp)
+    app.settings = type("Settings", (), {"onboarding_completed": True})()
+    app._onboarding_window = None
+    app._check_accessibility_permission = lambda: False
+    app.get_permission_status = lambda: {
+        "microphone": True,
+        "accessibility": False,
+        "input_monitoring": True,
+    }
+    shown = []
+
+    class FakeOnboarding:
+        @classmethod
+        def alloc(cls):
+            return cls()
+
+        def initWithApp_(self, app):
+            self.app = app
             return self
 
-        def setMessageText_(self, value):
-            self.__class__.message = value
+        def show(self):
+            shown.append(True)
 
-        def setInformativeText_(self, value):
-            self.__class__.information = value
+    monkeypatch.setattr("app.controller.OnboardingWindowController", FakeOnboarding)
 
-        def addButtonWithTitle_(self, _title):
-            return None
+    app.show_onboarding_if_needed()
 
-        def runModal(self):
-            return 1001  # 稍后处理
+    assert shown == [True]
 
-    class FakeAlertFactory:
-        @staticmethod
-        def alloc():
-            return FakeAlert()
 
-    monkeypatch.setattr("app.controller.AppKit.NSAlert", FakeAlertFactory)
-    monkeypatch.setattr(app, "_open_accessibility_settings", lambda: opened.append(True))
+def test_open_onboarding_allocates_and_shows_window(monkeypatch):
+    app = VoiceInputApp.__new__(VoiceInputApp)
+    app._onboarding_window = None
+    shown = []
 
-    app._show_permission_repair_guidance()
+    class FakeOnboarding:
+        @classmethod
+        def alloc(cls):
+            return cls()
 
-    assert "辅助功能" in FakeAlert.information
-    assert "输入监控" in FakeAlert.information
-    assert "删除列表中指向旧版本" in FakeAlert.information
-    assert "/Applications/WhisperCppCmd.app" in FakeAlert.information
-    assert opened == []
+        def initWithApp_(self, app):
+            self.app = app
+            return self
+
+        def show(self):
+            shown.append(True)
+
+    monkeypatch.setattr("app.controller.OnboardingWindowController", FakeOnboarding)
+    app.open_onboarding()
+    assert shown == [True]
+    assert app._onboarding_window is not None
+
+
+def test_onboarding_skip_marks_completed_and_orders_out():
+    from ui.onboarding_window import OnboardingWindowController
+
+    saved = []
+    ordered_out = []
+    fake_settings = type("Settings", (), {"onboarding_completed": False, "save": lambda *args: saved.append(True)})()
+    fake_app = type("App", (), {"settings": fake_settings})()
+    fake_window = type("Window", (), {"orderOut_": lambda _self, arg: ordered_out.append(arg)})()
+
+    controller = OnboardingWindowController.alloc().initWithApp_(fake_app)
+    controller.window = fake_window
+    controller.skipOnboarding_(None)
+
+    assert fake_settings.onboarding_completed is True
+    assert saved == [True]
+    assert ordered_out == [None]
+

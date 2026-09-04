@@ -13,7 +13,8 @@ from config.paths import resource_path
 from core import login_item
 
 
-_STATUS_ITEM_LENGTH = 22.0
+# 使用系统标准自适应宽度，并保持 16x16 图标尺寸
+_STATUS_ITEM_LENGTH = AppKit.NSVariableStatusItemLength
 _STATUS_ICON_SIZE = 16.0
 
 
@@ -26,7 +27,9 @@ class StatusBarController(NSObject):
             return None
 
         self.app = app
+        self._logger = getattr(app, "_logger", None)
         self.status_item = None
+        self._last_visibility_signature = None
         self.status_menu = None
         self.status_title_item = None
         self.model_item = None
@@ -76,20 +79,21 @@ class StatusBarController(NSObject):
         self.status_item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(
             _STATUS_ITEM_LENGTH
         )
+        if self.status_item is None:
+            self._log_warning("创建 macOS 菜单栏状态项失败：NSStatusBar 返回 None")
+            return
+
         self.status_item.setHighlightMode_(True)
-        # Explicitly keep a real slot in the menu bar.  A variable-length item
-        # can be represented by Accessibility while having no visible frame on
-        # newer macOS versions, especially after the app's activation policy or
-        # privacy state changes.
+        # 不允许用户通过状态项的可移除行为把唯一入口删掉。0 是 AppKit 的
+        # standard behavior；这里只是明确关闭 removalAllowed/terminationOnRemoval。
+        if hasattr(self.status_item, "setBehavior_"):
+            self.status_item.setBehavior_(0)
+        if hasattr(self.status_item, "setAutosaveName_"):
+            self.status_item.setAutosaveName_("WhisperCppCmdStatusBar")
         self.status_item.setVisible_(True)
 
         button = self.status_item.button()
-        button.setHidden_(False)
-        button.setEnabled_(True)
-        button.setImagePosition_(AppKit.NSImageOnly)
-        button.setImageScaling_(AppKit.NSImageScaleProportionallyDown)
-        button.setFrameSize_(AppKit.NSMakeSize(_STATUS_ITEM_LENGTH, _STATUS_ITEM_LENGTH))
-        button.setToolTip_("语音输入运行中")
+        self._configure_status_button(button)
 
         self._load_icons()
         self.setState_("idle")
@@ -340,6 +344,13 @@ class StatusBarController(NSObject):
         )
         show_item.setTarget_(self)
 
+        self.onboarding_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
+            "欢迎与权限引导…",
+            "openOnboarding:",
+            ""
+        )
+        self.onboarding_item.setTarget_(self)
+
         self.settings_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
             "打开设置…",
             "openSettings:",
@@ -376,6 +387,9 @@ class StatusBarController(NSObject):
         quit_item.setTarget_(self)
 
         self.status_item.setMenu_(self.status_menu)
+        # Attach the menu before the final visibility assertion.  Some macOS
+        # releases re-layout a newly-created item when its menu is assigned.
+        self.status_item.setVisible_(True)
 
     def _load_icons(self):
         symbol_map = {
@@ -415,17 +429,36 @@ class StatusBarController(NSObject):
                 self.icons[state] = image
 
     @objc.python_method
-    def ensure_visible(self):
-        """Reassert visibility after NSApplication changes activation policy."""
-        if self.status_item is None:
+    def _log_warning(self, message, *args, **kwargs):
+        if self._logger is not None:
+            self._logger.warning(message, *args, **kwargs)
+
+    @objc.python_method
+    def _configure_status_button(self, button):
+        """Apply only properties owned by the app; AppKit owns the button frame."""
+        if button is None:
             return
-        self.status_item.setLength_(_STATUS_ITEM_LENGTH)
-        self.status_item.setVisible_(True)
-        button = self.status_item.button()
-        if button is not None:
-            button.setHidden_(False)
-            button.setEnabled_(True)
-            button.setFrameSize_(AppKit.NSMakeSize(_STATUS_ITEM_LENGTH, _STATUS_ITEM_LENGTH))
+        button.setHidden_(False)
+        button.setEnabled_(True)
+        button.setImagePosition_(AppKit.NSImageOnly)
+        button.setImageScaling_(AppKit.NSImageScaleProportionallyDown)
+        button.setToolTip_("语音输入运行中")
+        if hasattr(button, "setAccessibilityLabel_"):
+            button.setAccessibilityLabel_("WhisperCppCmd")
+
+    @objc.python_method
+    def ensure_visible(self):
+        """确保状态栏项正常显示。"""
+        if self.status_item is None:
+            self._setup_status_item()
+            return
+        try:
+            self.status_item.setVisible_(True)
+            button = self.status_item.button()
+            if button is not None:
+                self._configure_status_button(button)
+        except Exception:
+            self._log_warning("恢复 WhisperCppCmd 菜单栏状态项失败", exc_info=True)
 
     def setState_(self, state):
         state_text = {
@@ -439,7 +472,11 @@ class StatusBarController(NSObject):
         if self.status_title_item is not None:
             self.status_title_item.setTitle_(f"状态：{state_text}")
 
+        if self.status_item is None:
+            return
         button = self.status_item.button()
+        if button is None:
+            return
         button.setToolTip_(f"语音输入运行中 - {state_text}")
 
         image = self.icons.get(state) or self.icons.get("idle")
@@ -709,6 +746,9 @@ class StatusBarController(NSObject):
 
     def exportDiagnostic_(self, sender):
         self.app.export_diagnostic_report()
+
+    def openOnboarding_(self, sender):
+        self.app.open_onboarding()
 
     def openSettings_(self, sender):
         self.app.open_settings()
