@@ -80,9 +80,15 @@ class StatusBarController(NSObject):
         return self
 
     def _setup_status_item(self):
-        self.status_item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(28.0)
+        self.status_item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(
+            _STATUS_ITEM_LENGTH
+        )
+        if self.status_item is None:
+            self._log_warning("创建 macOS 菜单栏状态项失败：NSStatusBar 返回 None")
+            return
+        if hasattr(self.status_item, "setHighlightMode_"):
+            self.status_item.setHighlightMode_(True)
         self.status_item.setBehavior_(0)
-        self.status_item.setAutosaveName_("WhisperCppCmd.StatusItem")
         self.status_item.setVisible_(True)
         self._configure_status_button(self.status_item.button())
         self._load_icons()
@@ -130,7 +136,7 @@ class StatusBarController(NSObject):
         item(self.status_menu, "quit_item", "退出 WhisperCppCmd", "quitApp:", "q")
         self.status_item.setMenu_(self.status_menu)
         if hasattr(self.status_item, "setLength_"):
-            self.status_item.setLength_(28.0)
+            self.status_item.setLength_(_STATUS_ITEM_LENGTH)
         self.status_item.setVisible_(True)
         self._configure_status_button(self.status_item.button())
         self.setState_("idle")
