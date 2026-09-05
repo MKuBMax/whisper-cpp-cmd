@@ -6,6 +6,9 @@ __pycache__/
 models/*.bin
 !models/ggml-silero-v6.2.0.bin
 WhisperCppCmd.app/
+build/dev/
+.py2app-build-dev/
+.py2app-dist-dev/
 logs/
 config.json
 glossary.txt
