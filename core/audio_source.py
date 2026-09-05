@@ -38,12 +38,13 @@ from config.paths import (
     ensure_runtime_dirs,
     is_standalone_bundle,
     logs_dir,
+    project_root,
     runtime_root,
 )
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_DIR = runtime_root()
+_PROJECT_DIR = project_root()
 _LOG_DIR = logs_dir()
 _AUDIO_WORKER_FLAG = "--whispercpp-audio-worker"
 

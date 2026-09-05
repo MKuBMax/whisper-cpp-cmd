@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """运行时路径。
 
-开发时项目仍然把配置、模型和日志放在仓库根目录，方便现有的 alias
-模式调试。独立分发的 py2app 则把这些可变数据放到用户的
-``~/Library/Application Support/WhisperCppCmd``，避免向 ``.app`` 内写文件。
+裸源码运行（run_dev.sh / pytest）把配置、模型和日志放在仓库根目录。
+py2app standalone 正式包和本地 DEV alias 包都把可变数据放到用户的
+``~/Library/Application Support/WhisperCppCmd``，两者共用同一套数据，
+DEV 的 bundle 身份仅用于系统授权隔离。
 """
 
 from __future__ import annotations
@@ -15,6 +16,8 @@ from typing import Optional
 
 
 APP_NAME = "WhisperCppCmd"
+DEV_APP_NAME = "WhisperCppCmdDev"
+DEV_BUNDLE_ID = "com.mkbm.whispercppcmd.dev"
 DATA_DIR_ENV = "WHISPER_CPP_CMD_DATA_DIR"
 CLI_PATH_ENV = "WHISPER_CPP_CMD_WHISPER_CLI"
 
@@ -56,12 +59,40 @@ def resource_root() -> str:
     return project_root()
 
 
+def is_dev_bundle() -> bool:
+    """判断当前是否运行在本地 DEV alias App 中。
+
+    DEV 包与正式版共用同一套数据目录，bundle 身份仅用于系统授权隔离。
+    alias 包没有 Resources/lib 和 Frameworks/Python.framework，但 __boot__.py
+    存在；裸源码运行没有 RESOURCEPATH。两者都不满足 standalone 条件。"""
+    resource_dir = _bundle_resource_path()
+    if not resource_dir:
+        return False
+    if is_standalone_bundle():
+        return False
+    bundle_id = ""
+    plist_path = os.path.join(
+        os.path.dirname(resource_dir), "Info.plist"
+    )
+    try:
+        import plistlib
+
+        with open(plist_path, "rb") as stream:
+            bundle_id = str(plistlib.load(stream).get("CFBundleIdentifier", ""))
+    except (OSError, ValueError):
+        bundle_id = ""
+    if bundle_id == DEV_BUNDLE_ID:
+        return True
+    app_dir = os.path.dirname(os.path.dirname(resource_dir))
+    return os.path.basename(app_dir) == f"{DEV_APP_NAME}.app"
+
+
 def runtime_root() -> str:
     """返回可写运行时数据根目录。"""
     override = os.environ.get(DATA_DIR_ENV)
     if override:
         return os.path.abspath(os.path.expanduser(override))
-    if is_standalone_bundle():
+    if is_standalone_bundle() or is_dev_bundle():
         return os.path.expanduser(os.path.join("~/Library/Application Support", APP_NAME))
     return project_root()
 
@@ -107,14 +138,19 @@ def app_executable() -> Optional[str]:
 
     alias 和 standalone 都会设置 ``RESOURCEPATH``；区别只在资源布局，
     因此登录启动需要的可执行文件路径可以共用这条解析逻辑。
+    DEV 包的可执行文件名为 WhisperCppCmdDev，正式包为 WhisperCppCmd，
+    按 bundle 实际名称解析，避免 DEV 误报正式版路径。
     """
     resource_dir = _bundle_resource_path()
     if not resource_dir:
         return None
-    path = os.path.realpath(
-        os.path.join(resource_dir, os.pardir, "MacOS", APP_NAME)
-    )
-    return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+    macos_dir = os.path.join(resource_dir, os.pardir, "MacOS")
+    candidates = (DEV_APP_NAME, APP_NAME)
+    for name in candidates:
+        path = os.path.realpath(os.path.join(macos_dir, name))
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
 
 
 def bundled_whisper_cli_path() -> Optional[str]:

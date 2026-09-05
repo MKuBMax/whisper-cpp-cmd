@@ -1,8 +1,9 @@
 #!/bin/bash
 # 开发模式：构建并启动本地 DEV 启动器 App（py2app alias，引用源码）。
 # 不替换 /Applications/WhisperCppCmd.app；正式发布仍走 ship_app.sh。
-# DEV 与正式版共用同一套数据（config.json、模型、历史），同时只跑一个：
-# 启动 DEV 前先停掉正式版和旧 DEV。
+# DEV 与正式版共用正式版数据目录（~/Library/Application Support/WhisperCppCmd
+# 下的 config.json、日志、历史；模型与历史路径由 config 内的绝对路径决定），
+# 同时只跑一个：启动 DEV 前先停掉正式版和旧 DEV。
 # 用法：bash run_dev_app.sh
 set -euo pipefail
 
