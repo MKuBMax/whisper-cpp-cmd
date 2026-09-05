@@ -45,7 +45,7 @@ class FeedbackController(NSObject):
         return self
 
     @objc.python_method
-    def show_message(self, text, timeout=2.5):
+    def show_message(self, text, timeout=1.0):
         NSObject.cancelPreviousPerformRequestsWithTarget_(self)
         screen = AppKit.NSScreen.mainScreen()
         frame = screen.visibleFrame() if screen is not None else AppKit.NSMakeRect(0, 0, 1440, 900)
