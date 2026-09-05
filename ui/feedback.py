@@ -24,7 +24,7 @@ class FeedbackController(NSObject):
         self.panel.setBackgroundColor_(AppKit.NSColor.clearColor())
         self.panel.setLevel_(AppKit.NSScreenSaverWindowLevel)
         self.panel.setIgnoresMouseEvents_(True)
-        self.panel.setHasShadow_(False)
+        self.panel.setHasShadow_(True)
         self.panel.setCollectionBehavior_(
             AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
             | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
