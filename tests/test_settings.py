@@ -115,3 +115,16 @@ def test_save_creates_private_parent_and_uses_atomic_temp_files(tmp_path):
     assert path.exists()
     assert not list(path.parent.glob(".*.tmp-*"))
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_show_in_dock_setting_default_and_roundtrip(tmp_path):
+    s = Settings()
+    assert s.show_in_dock is True
+
+    path = tmp_path / "dock_config.json"
+    s.show_in_dock = False
+    s.save(str(path))
+
+    loaded = Settings.load(str(path))
+    assert loaded.show_in_dock is False
+

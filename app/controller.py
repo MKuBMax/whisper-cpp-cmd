@@ -235,19 +235,34 @@ class _SignalPump(NSObject):
                 pass  # tick_ 是诊断辅助，异常不应影响 runloop
 
 
-class _TerminationDelegate(NSObject):
-    """NSApplication 终止委托：兜住 Cmd+Q / 关机 / 注销 / 强制退出。
-
-    没有 it，这些路径走 NSApplication 默认流程，绕过 shutdown()，导致 whisper-server
-    子进程成孤儿（PPID 被 launchd 收养，泄漏 ~3GB/模型）。同步在主线程跑幂等 shutdown，
-    含 _stop_server 杀子进程；阻塞数秒可接受，关机被系统强杀的极端情况由启动期防线1兜底。
-    """
+class _AppDelegate(NSObject):
+    """NSApplication 委托：兜住退出、Dock 点击与 Dock 右键菜单。"""
 
     def applicationShouldTerminate_(self, sender):
         app = getattr(self, "_app_ref", None)
         if app is not None and app._is_running:
             app.shutdown()
         return AppKit.NSTerminateNow
+
+    def applicationDockMenu_(self, sender):
+        """用户在 Dock 图标上右键时，返回完整的控制菜单。"""
+        app = getattr(self, "_app_ref", None)
+        if app is not None and getattr(app, "status_bar", None) is not None:
+            return app.status_bar.status_menu
+        return None
+
+    def applicationShouldHandleReopen_hasVisibleWindows_(self, sender, flag):
+        """用户点击 Dock 图标时，唤起偏好设置或向导窗口。"""
+        app = getattr(self, "_app_ref", None)
+        if app is not None:
+            if not getattr(app.settings, "onboarding_completed", False):
+                app.open_onboarding()
+            else:
+                app.open_settings()
+        return True
+
+
+_TerminationDelegate = _AppDelegate
 
 
 class VoiceInputApp:
@@ -325,11 +340,12 @@ class VoiceInputApp:
             return False
 
         ns_app = AppKit.NSApplication.sharedApplication()
-        # Set the final activation policy before creating NSStatusItem.  The
-        # previous order created the item while the app was still regular and
-        # changed to accessory only after all UI was built; macOS 26 can then
-        # leave the item's window outside the menu bar after relayout.
-        ns_app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+        policy = (
+            AppKit.NSApplicationActivationPolicyRegular
+            if getattr(self.settings, "show_in_dock", True)
+            else AppKit.NSApplicationActivationPolicyAccessory
+        )
+        ns_app.setActivationPolicy_(policy)
         self.status_bar = StatusBarController.alloc().initWithApp_(self)
         try:
             self._overlay = RecordingOverlay.alloc().init()
@@ -501,6 +517,15 @@ class VoiceInputApp:
         """保存设置窗口中的应用级选项。"""
         if "update_check_enabled" in values:
             self.settings.update_check_enabled = bool(values["update_check_enabled"])
+        if "show_in_dock" in values:
+            new_val = bool(values["show_in_dock"])
+            if new_val != getattr(self.settings, "show_in_dock", True):
+                self.settings.show_in_dock = new_val
+                app = AppKit.NSApplication.sharedApplication()
+                if self.settings.show_in_dock:
+                    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
+                else:
+                    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
         self.settings.__post_init__()
         self.settings.save()
         self._refresh_status_bar_details()
@@ -893,6 +918,8 @@ class VoiceInputApp:
         AppHelper.callAfter(self.status_bar.setAutoReleaseCountdown_, self._get_auto_release_countdown_text())
         AppHelper.callAfter(self.status_bar.setAutoPaste_, self.settings.auto_paste)
         AppHelper.callAfter(self.status_bar.setLoginAtStartup_, login_item.is_enabled())
+        if hasattr(self.status_bar, "setShowInDock_"):
+            AppHelper.callAfter(self.status_bar.setShowInDock_, getattr(self.settings, "show_in_dock", True))
         AppHelper.callAfter(self.status_bar.setVad_, self.settings.use_vad)
         AppHelper.callAfter(self.status_bar.setOverlay_, self.settings.show_overlay)
         AppHelper.callAfter(self.status_bar.setOverlayFollowMouse_, self.settings.overlay_follow_mouse)
@@ -1467,6 +1494,19 @@ class VoiceInputApp:
         self._refresh_status_bar_details()
         self._logger.info("开机启动切换：%s", enabled)
         print(f"🚀 开机启动已{'开启' if enabled else '关闭'}（下次登录生效）")
+
+    def toggle_show_in_dock(self):
+        """切换是否在 Dock 栏常驻显示图标。"""
+        self.settings.show_in_dock = not getattr(self.settings, "show_in_dock", True)
+        self.settings.save()
+        app = AppKit.NSApplication.sharedApplication()
+        if self.settings.show_in_dock:
+            app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
+        else:
+            app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+        self._refresh_status_bar_details()
+        self._logger.info("Dock 图标显示切换：%s", self.settings.show_in_dock)
+        print(f"🖥️ Dock 栏图标已{'开启' if self.settings.show_in_dock else '关闭'}")
 
     def toggle_vad(self):
         if self.pipeline is not None and self.pipeline.is_recording:
@@ -2154,13 +2194,17 @@ class VoiceInputApp:
         AppHelper.callAfter(self._check_for_updates_if_due)
 
         app = AppKit.NSApplication.sharedApplication()
-        app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
-        # Reassert after the event loop is fully wired and record diagnostics.
+        policy = (
+            AppKit.NSApplicationActivationPolicyRegular
+            if getattr(self.settings, "show_in_dock", True)
+            else AppKit.NSApplicationActivationPolicyAccessory
+        )
+        app.setActivationPolicy_(policy)
         if self.status_bar is not None:
             self.refresh_status_bar_health()
 
-        # 防线2b：注册终止委托，兜住 Cmd+Q / 关机 / 注销（否则绕过 shutdown 留下孤儿 server）
-        self._term_delegate = _TerminationDelegate.alloc().init()
+        # 注册应用委托：处理终止、Dock 点击与 Dock 菜单
+        self._term_delegate = _AppDelegate.alloc().init()
         self._term_delegate._app_ref = self  # 强引用持有，防 PyObjC 弱引用回收
         app.setDelegate_(self._term_delegate)
 

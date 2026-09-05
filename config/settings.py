@@ -122,6 +122,7 @@ class Settings:
     history_file: str = ""
     history_max_entries: int = 100
     onboarding_completed: bool = False
+    show_in_dock: bool = True  # 同时在 Dock 栏显示图标（防刘海屏/菜单栏隐藏工具折叠丢失）
     
     # 日志配置
     verbose: bool = True
@@ -176,6 +177,7 @@ class Settings:
             ("overlay_follow_mouse", False),
             ("verbose", True),
             ("use_vad", False),
+            ("show_in_dock", True),
         ):
             setattr(self, name, _coerce_bool(getattr(self, name, default), default))
 

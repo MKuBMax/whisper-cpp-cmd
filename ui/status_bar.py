@@ -48,6 +48,7 @@ class StatusBarController(NSObject):
         self.accessibility_permission_item = None
         self.input_monitoring_permission_item = None
         self.auto_paste_item = None
+        self.show_in_dock_item = None
         self.login_at_startup_item = None
         self.vad_item = None
         self.duck_item = None
@@ -88,8 +89,6 @@ class StatusBarController(NSObject):
         # standard behavior；这里只是明确关闭 removalAllowed/terminationOnRemoval。
         if hasattr(self.status_item, "setBehavior_"):
             self.status_item.setBehavior_(0)
-        if hasattr(self.status_item, "setAutosaveName_"):
-            self.status_item.setAutosaveName_("WhisperCppCmdStatusBar")
         self.status_item.setVisible_(True)
 
         button = self.status_item.button()
@@ -358,6 +357,13 @@ class StatusBarController(NSObject):
         )
         self.settings_item.setTarget_(self)
 
+        self.show_in_dock_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
+            "在 Dock 栏显示图标",
+            "toggleShowInDock:",
+            ""
+        )
+        self.show_in_dock_item.setTarget_(self)
+
         self.stats_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
             "统计面板…",
             "showStats:",
@@ -392,27 +398,7 @@ class StatusBarController(NSObject):
         self.status_item.setVisible_(True)
 
     def _load_icons(self):
-        symbol_map = {
-            "idle": "mic",
-            "recording": "mic.fill",
-            "processing": "waveform",
-            "error": "exclamationmark.triangle",
-            "paused": "mic.slash",
-        }
-        for state, symbol_name in symbol_map.items():
-            image = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
-                symbol_name,
-                None
-            )
-            if image is not None:
-                image = image.copy()
-                image.setTemplate_(True)
-                image.setSize_(AppKit.NSMakeSize(16, 16))
-                self.icons[state] = image
-
-        if self.icons:
-            return
-
+        # 优先加载本地 22x22 Retina 模板图片，确保在任何第三方菜单栏管理器下尺寸与渲染 100% 确定
         icon_map = {
             "idle": "mic_idle.png",
             "recording": "mic_recording.png",
@@ -422,8 +408,32 @@ class StatusBarController(NSObject):
         }
         for state, filename in icon_map.items():
             path = resource_path("icons", filename)
-            image = AppKit.NSImage.alloc().initByReferencingFile_(path)
-            if image:
+            if os.path.isfile(path):
+                image = AppKit.NSImage.alloc().initByReferencingFile_(path)
+                if image and image.isValid():
+                    image.setTemplate_(True)
+                    image.setSize_(AppKit.NSMakeSize(_STATUS_ICON_SIZE, _STATUS_ICON_SIZE))
+                    self.icons[state] = image
+
+        if len(self.icons) >= 4:
+            return
+
+        symbol_map = {
+            "idle": "mic",
+            "recording": "mic.fill",
+            "processing": "waveform",
+            "error": "exclamationmark.triangle",
+            "paused": "mic.slash",
+        }
+        for state, symbol_name in symbol_map.items():
+            if state in self.icons:
+                continue
+            image = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                symbol_name,
+                None
+            )
+            if image is not None:
+                image = image.copy()
                 image.setTemplate_(True)
                 image.setSize_(AppKit.NSMakeSize(_STATUS_ICON_SIZE, _STATUS_ICON_SIZE))
                 self.icons[state] = image
@@ -482,6 +492,11 @@ class StatusBarController(NSObject):
         image = self.icons.get(state) or self.icons.get("idle")
         if image is not None:
             button.setImage_(image)
+            button.setImagePosition_(AppKit.NSImageOnly)
+        else:
+            # 容灾兜底：绝不留出 0 宽度空白，使用 Emoji 保证菜单项始终可见可点
+            button.setTitle_("🎙️")
+            button.setImagePosition_(AppKit.NSNoImage)
 
     def setModelName_(self, model_name):
         if self.model_item is not None:
@@ -566,6 +581,12 @@ class StatusBarController(NSObject):
     def setLoginAtStartup_(self, enabled):
         if self.login_at_startup_item is not None:
             self.login_at_startup_item.setState_(
+                AppKit.NSControlStateValueOn if enabled else AppKit.NSControlStateValueOff
+            )
+
+    def setShowInDock_(self, enabled):
+        if self.show_in_dock_item is not None:
+            self.show_in_dock_item.setState_(
                 AppKit.NSControlStateValueOn if enabled else AppKit.NSControlStateValueOff
             )
 
@@ -767,6 +788,9 @@ class StatusBarController(NSObject):
 
     def toggleLoginAtStartup_(self, sender):
         self.app.toggle_login_at_startup()
+
+    def toggleShowInDock_(self, sender):
+        self.app.toggle_show_in_dock()
 
     def checkAccessibility_(self, sender):
         self.app.check_accessibility_permission()

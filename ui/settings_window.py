@@ -55,12 +55,18 @@ class SettingsWindowController(NSObject):
             secondary=True,
         )
 
-        self._label(content, "发布体验", 34, height - 125, 300, 24, 16)
+        self._label(content, "界面与入口", 34, height - 125, 300, 24, 16)
+        self._checkbox(
+            content,
+            "show_in_dock",
+            "在 Dock 栏显示应用图标（推荐：防刘海屏/菜单栏隐藏工具折叠丢失）",
+            height - 159,
+        )
         self._checkbox(
             content,
             "update_check_enabled",
             "每天自动检查 GitHub 更新（仅提示，不自动安装）",
-            height - 159,
+            height - 189,
         )
         self._button(content, "models", "打开模型目录", 34, 70, 150, 30, "openModelsFolder:")
         self._button(content, "stats", "打开统计面板", 200, 70, 150, 30, "showStats:")
@@ -105,21 +111,30 @@ class SettingsWindowController(NSObject):
     @objc.python_method
     def _load_values(self):
         settings = self.app.settings
-        control = self._controls["update_check_enabled"]
-        control.setState_(
-            AppKit.NSControlStateValueOn
-            if settings.update_check_enabled
-            else AppKit.NSControlStateValueOff
-        )
+        dock_control = self._controls.get("show_in_dock")
+        if dock_control is not None:
+            dock_control.setState_(
+                AppKit.NSControlStateValueOn
+                if getattr(settings, "show_in_dock", True)
+                else AppKit.NSControlStateValueOff
+            )
+        update_control = self._controls.get("update_check_enabled")
+        if update_control is not None:
+            update_control.setState_(
+                AppKit.NSControlStateValueOn
+                if settings.update_check_enabled
+                else AppKit.NSControlStateValueOff
+            )
         self._set_status("")
 
     @objc.python_method
     def _values(self):
-        return {
-            "update_check_enabled": bool(
-                self._controls["update_check_enabled"].state()
-            )
-        }
+        vals = {}
+        if "show_in_dock" in self._controls:
+            vals["show_in_dock"] = bool(self._controls["show_in_dock"].state())
+        if "update_check_enabled" in self._controls:
+            vals["update_check_enabled"] = bool(self._controls["update_check_enabled"].state())
+        return vals
 
     def checkboxChanged_(self, sender):
         # 先更新控件状态，点击“保存”时统一写入，避免每个勾选都重建运行时对象。
