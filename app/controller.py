@@ -134,7 +134,6 @@ from config.version import APP_VERSION, UPDATE_REPOSITORY
 from core.dictation_trace import DictationTrace
 from core.pipeline import Pipeline, PipelineConfig, AudioConfig
 from core.perf_log import append_perf_log
-from core.live_dictation import LiveDictationSession, LiveDictationConfig
 from core.media_ducker import MediaDucker
 from core.stats import format_stats, load_perf_records, summarize_perf_records
 from core.update_checker import (
@@ -151,7 +150,8 @@ from ui.status_bar import StatusBarController
 from ui.overlay_window import RecordingOverlay
 from ui.settings_window import SettingsWindowController
 from ui.dashboard_window import DashboardWindowController
-from ui.floating_pill import FloatingPillController
+from core.model_download import ModelDownload, RECOMMENDED_MODEL
+from ui.feedback import FeedbackController
 from ui.stats_window import StatsWindowController
 from ui.onboarding_window import OnboardingWindowController
 from app import diagnostics
@@ -283,6 +283,7 @@ class VoiceInputApp:
         self._shutdown_lock = threading.Lock()
         self._state = "idle"
         self._last_result = "无"
+        self._last_transcript = ""
         self._model_setup_required = False
         self._error_reset_timer: threading.Timer | None = None
         self._paused = False
@@ -291,7 +292,7 @@ class VoiceInputApp:
         self._idle_release_deadline: float | None = None
         self._backend_released = False
         self._pipeline_transitioning = False
-        self._live_dictation: LiveDictationSession | None = None
+        self._live_dictation = None
         self._backend_warmup_thread: threading.Thread | None = None
         self._backend_warmup_lock = threading.Lock()
         self._current_trace: DictationTrace | None = None
@@ -314,7 +315,9 @@ class VoiceInputApp:
         self._input_monitoring_trusted: bool | None = None
         self._permission_repair_alert_key = None
         self._overlay: RecordingOverlay | None = None
-        self._floating_pill: FloatingPillController | None = None
+        self._feedback = None
+        self._model_download = ModelDownload()
+        self._model_loader_thread = None
         self._settings_window: SettingsWindowController | None = None
         self._dashboard_window: DashboardWindowController | None = None
         self._stats_window: StatsWindowController | None = None
@@ -340,8 +343,7 @@ class VoiceInputApp:
         if not self.settings.model_exists():
             print(f"❌ 模型文件不存在：{self.settings.get_model_path()}")
             self._model_setup_required = True
-        elif not self._create_pipeline():
-            return False
+
 
         ns_app = AppKit.NSApplication.sharedApplication()
         policy = (
@@ -359,13 +361,7 @@ class VoiceInputApp:
             self._logger.exception("录音浮窗构建失败，将禁用")
             self._overlay = None
 
-        try:
-            self._floating_pill = FloatingPillController.alloc().initWithApp_(self)
-            if getattr(self.settings, "show_floating_pill", True):
-                self._floating_pill.show()
-        except Exception:
-            self._logger.exception("桌面悬浮胶囊构建失败")
-            self._floating_pill = None
+        self._feedback = FeedbackController.alloc().init()
 
         self._refresh_status_bar_details()
         self._refresh_status_bar_dynamic_details()
@@ -498,38 +494,106 @@ class VoiceInputApp:
         pipeline_config.vad_model = self.settings.vad_model
 
         self.pipeline = Pipeline(pipeline_config)
-        self._live_dictation = LiveDictationSession(
-            audio_source=self.pipeline.audio_source,
-            model_engine=self.pipeline.model_engine,
-            clipboard=self.pipeline.clipboard,
-            config=LiveDictationConfig(
-                update_interval=0.25,
-                window_seconds=4.0,
-                min_audio_seconds=0.45,
-                silence_rms_threshold=0.008,
-                chinese_script=self.settings.chinese_script,
-                reconcile_interval=2.0,
-                reconcile_min_audio_seconds=1.25,
-                mutable_tail_chars=80,
-                max_overlap_chars=120,
-                full_reconcile_diff_ratio=0.65,
-            ),
-        )
+        self._live_dictation = None
+        self.pipeline.before_transcribe = self._wait_for_backend_warmup
         self.pipeline.trace = None
         self.pipeline.audio_source.trace = None
         self.pipeline.model_engine.trace = None
-        self._live_dictation.trace = None
-        return self.pipeline.initialize()
+        loaded = self.pipeline.initialize()
+        if not loaded:
+            failed_pipeline = self.pipeline
+            self.pipeline = None
+            try:
+                failed_pipeline.shutdown()
+            except Exception:
+                self._logger.warning("清理失败的流水线失败", exc_info=True)
+        return loaded
 
     def open_dashboard(self) -> None:
-        if self._dashboard_window is None:
+        if getattr(self, "_dashboard_window", None) is None:
             self._dashboard_window = DashboardWindowController.alloc().initWithApp_(self)
         self._dashboard_window.show()
 
     def open_settings(self) -> None:
-        if self._settings_window is None:
-            self._settings_window = SettingsWindowController.alloc().initWithApp_(self)
-        self._settings_window.show()
+        self.open_dashboard()
+
+    def load_model_async(self, name, force: bool = False):
+        name = str(name or "").strip()
+        if not name or name not in self.settings.list_available_models():
+            self._logger.warning("忽略不存在的模型：%s", name)
+            self._model_setup_required = True
+            self._last_result = "错误：模型文件不存在"
+            self._refresh_status_bar_details()
+            return False
+        if (
+            not force
+            and name == self.settings.current_model
+            and self.pipeline is not None
+            and self.pipeline.is_initialized
+        ):
+            return True
+        if (self._pipeline_transitioning or self._worker_busy
+                or self._state in {"recording", "processing"}):
+            return False
+        previous_model = self.settings.current_model
+        self._pipeline_transitioning = True
+        self._set_state("processing")
+
+        def work():
+            try:
+                self.settings.current_model = name
+                loaded = self._rebuild_pipeline()
+                restored = False
+                if not loaded and name != previous_model and self.settings.model_exists(previous_model):
+                    self._logger.warning("模型加载失败，尝试恢复上一模型：%s", previous_model)
+                    self.settings.current_model = previous_model
+                    restored = self._rebuild_pipeline()
+                if loaded:
+                    self.settings.save()
+                else:
+                    self.settings.current_model = previous_model
+                    self.settings.save()
+                    if restored:
+                        self._logger.info("已恢复上一模型：%s", previous_model)
+                if not loaded and self._is_running:
+                    AppHelper.callAfter(self.open_dashboard)
+            except Exception:
+                self._logger.exception("模型加载失败")
+                self.settings.current_model = previous_model
+                self.settings.save()
+                self._model_setup_required = True
+                self._set_state("error")
+                if self._is_running:
+                    AppHelper.callAfter(self.open_dashboard)
+            finally:
+                self._pipeline_transitioning = False
+                self._refresh_status_bar_details()
+        self._model_loader_thread = threading.Thread(target=work, name="ModelLoader", daemon=True)
+        self._model_loader_thread.start()
+        return True
+
+    def download_recommended_model(self):
+        if self.settings.model_exists(RECOMMENDED_MODEL):
+            return self.load_model_async(RECOMMENDED_MODEL)
+        def completed(success):
+            if success:
+                self._model_download.message = ""
+            if success and self._is_running:
+                AppHelper.callAfter(self.load_model_async, RECOMMENDED_MODEL)
+            dashboard = getattr(self, "_dashboard_window", None)
+            if dashboard is not None and self._is_running:
+                AppHelper.callAfter(dashboard.refresh)
+        started = self._model_download.start(
+            self.settings.models_dir,
+            completed,
+            updated=self._model_download_updated,
+        )
+        return started
+
+    def _model_download_updated(self):
+        dashboard = getattr(self, "_dashboard_window", None)
+        if dashboard is not None and self._is_running:
+            AppHelper.callAfter(dashboard.refresh)
 
     def apply_app_settings(self, values: dict) -> None:
         """保存设置窗口中的应用级选项。"""
@@ -544,17 +608,6 @@ class VoiceInputApp:
                     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
                 else:
                     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
-        if "show_floating_pill" in values:
-            new_pill = bool(values["show_floating_pill"])
-            if new_pill != getattr(self.settings, "show_floating_pill", True):
-                self.settings.show_floating_pill = new_pill
-                if self._floating_pill is not None:
-                    self._floating_pill.set_visible(self.settings.show_floating_pill)
-        if "status_bar_show_title" in values:
-            new_title = bool(values["status_bar_show_title"])
-            if new_title != getattr(self.settings, "status_bar_show_title", True):
-                self.settings.status_bar_show_title = new_title
-                self._set_state(self._state)
         self.settings.__post_init__()
         self.settings.save()
         self._refresh_status_bar_details()
@@ -569,27 +622,15 @@ class VoiceInputApp:
         self._stats_window.show()
 
     def open_onboarding(self) -> None:
-        """手动打开欢迎与权限向导窗口。"""
-        if self._onboarding_window is None:
-            self._onboarding_window = OnboardingWindowController.alloc().initWithApp_(self)
-        self._onboarding_window.show()
+        self.open_dashboard()
+        self._onboarding_window = self._dashboard_window
 
     def show_onboarding_if_needed(self) -> None:
-        # 即使用户之前点过完成，只要核心权限后来因替换 App 而失效，也重新
-        # 打开同一个常驻向导；不再用一次性的权限 Alert 打断用户。
         self._check_accessibility_permission()
         permissions = self.get_permission_status()
-        if self.settings.onboarding_completed and all(
-            permissions.get(key, False) for key in ("microphone", "accessibility")
-        ):
-            return
-        # 允许测试/恢复路径使用未完整初始化的轻量控制器对象。
-        getattr(self, "_logger", logging.getLogger(__name__)).info(
-            "显示常驻欢迎页：permissions=%s", permissions
-        )
-        if self._onboarding_window is None:
-            self._onboarding_window = OnboardingWindowController.alloc().initWithApp_(self)
-        self._onboarding_window.show()
+        if (not self.settings.onboarding_completed or not self.settings.model_exists()
+                or not all(permissions.get(k) for k in ("microphone", "accessibility"))):
+            self.open_onboarding()
 
     def _check_for_updates_if_due(self) -> None:
         """每天最多自动检查一次；自动检查不打扰用户显示“已最新”。"""
@@ -808,14 +849,6 @@ class VoiceInputApp:
             print("❌ 录音中无法切换该配置")
             return False
 
-        self._cancel_error_reset_timer()
-        self._cancel_idle_release_timer()
-
-        if self._live_dictation is not None:
-            self._live_dictation.stop()
-        if self.pipeline:
-            self.pipeline.shutdown()
-
         if not self.settings.model_exists():
             print(f"❌ 模型文件不存在：{self.settings.get_model_path()}")
             self._model_setup_required = True
@@ -824,12 +857,25 @@ class VoiceInputApp:
             self._refresh_status_bar_details()
             return False
 
+        self._cancel_error_reset_timer()
+        self._cancel_idle_release_timer()
+
+        if self._live_dictation is not None:
+            self._live_dictation.stop()
+        if self.pipeline:
+            self.pipeline.shutdown()
+            self.pipeline = None
+
         if not self._create_pipeline():
+            self._model_setup_required = True
             self._last_result = "错误：转写引擎重启失败"
             self._set_state("error")
             self._refresh_status_bar_details()
             return False
 
+        if not self._is_running:
+            self.pipeline.shutdown()
+            return False
         self._backend_released = False
         self._model_setup_required = False
         self._set_state("paused" if self._paused else "idle")
@@ -916,6 +962,8 @@ class VoiceInputApp:
         if state == "error":
             self._schedule_error_reset()
         if state == "recording":
+            if getattr(self, "_feedback", None) is not None:
+                AppHelper.callAfter(self._feedback.hide_, None)
             self._show_overlay()
         else:
             self._hide_overlay()
@@ -937,7 +985,7 @@ class VoiceInputApp:
 
         AppHelper.callAfter(self.status_bar.setModelName_, self.settings.current_model)
         AppHelper.callAfter(self.status_bar.setBackendStatus_, backend_text)
-        AppHelper.callAfter(self.status_bar.setLastResult_, self._truncate_menu_text(self._last_result))
+        AppHelper.callAfter(self.status_bar.setLastResult_, self._truncate_menu_text(getattr(self, "_last_transcript", "") or "无"))
         AppHelper.callAfter(self.status_bar.setPaused_, self._paused)
         AppHelper.callAfter(
             self.status_bar.setReleaseBackendEnabled_,
@@ -949,10 +997,6 @@ class VoiceInputApp:
         AppHelper.callAfter(self.status_bar.setLoginAtStartup_, login_item.is_enabled())
         if hasattr(self.status_bar, "setShowInDock_"):
             AppHelper.callAfter(self.status_bar.setShowInDock_, getattr(self.settings, "show_in_dock", True))
-        if hasattr(self.status_bar, "setShowFloatingPill_"):
-            AppHelper.callAfter(self.status_bar.setShowFloatingPill_, getattr(self.settings, "show_floating_pill", True))
-        if hasattr(self.status_bar, "setStatusBarShowTitle_"):
-            AppHelper.callAfter(self.status_bar.setStatusBarShowTitle_, getattr(self.settings, "status_bar_show_title", True))
         AppHelper.callAfter(self.status_bar.setVad_, self.settings.use_vad)
         AppHelper.callAfter(self.status_bar.setOverlay_, self.settings.show_overlay)
         AppHelper.callAfter(self.status_bar.setOverlayFollowMouse_, self.settings.overlay_follow_mouse)
@@ -1397,6 +1441,9 @@ class VoiceInputApp:
     def refresh_accessibility_permission_status(self):
         """菜单打开时静默刷新权限状态，不主动弹出系统授权引导。"""
         self._check_accessibility_permission()
+        dashboard = getattr(self, "_dashboard_window", None)
+        if dashboard is not None and dashboard.window is not None and dashboard.window.isVisible():
+            dashboard.refresh()
         onboarding = getattr(self, "_onboarding_window", None)
         if onboarding is not None:
             onboarding.update_permission_status(self.get_permission_status())
@@ -1569,41 +1616,14 @@ class VoiceInputApp:
             return 0.0
 
     def _show_overlay(self):
-        if self._floating_pill is not None:
-            AppHelper.callAfter(self._floating_pill.on_recording_started)
         if self._overlay is None or not self.settings.show_overlay:
             return
         AppHelper.callAfter(self._overlay.show)
 
     def _hide_overlay(self):
-        if self._floating_pill is not None:
-            AppHelper.callAfter(self._floating_pill.on_recording_stopped)
         if self._overlay is None:
             return
         AppHelper.callAfter(self._overlay.hide)
-
-    def toggle_floating_pill(self):
-        self.settings.show_floating_pill = not getattr(self.settings, "show_floating_pill", True)
-        self.settings.save()
-        if self._floating_pill is not None:
-            AppHelper.callAfter(self._floating_pill.set_visible, self.settings.show_floating_pill)
-        self._refresh_status_bar_details()
-        self._logger.info("桌面悬浮胶囊切换：%s", self.settings.show_floating_pill)
-        print(f"💊 桌面悬浮胶囊已{'开启' if self.settings.show_floating_pill else '关闭'}")
-
-    def toggle_status_bar_title(self):
-        self.settings.status_bar_show_title = not getattr(self.settings, "status_bar_show_title", True)
-        self.settings.save()
-        self._set_state(self._state)
-        self._refresh_status_bar_details()
-        self._logger.info("状态栏文字显示切换：%s", self.settings.status_bar_show_title)
-        print(f"🏷️ 状态栏文字显示已{'开启' if self.settings.status_bar_show_title else '关闭'}")
-
-    def reanchor_status_bar(self):
-        if self.status_bar is not None:
-            AppHelper.callAfter(self.status_bar.reanchor)
-            self._logger.info("重新挂载状态栏图标")
-            print("🔄 状态栏图标已重新向系统挂载")
 
     def toggle_overlay(self):
         self.settings.show_overlay = not self.settings.show_overlay
@@ -1655,9 +1675,13 @@ class VoiceInputApp:
         return ok
 
     def copy_last_result(self):
-        if self._last_result == "无":
+        text = getattr(self, "_last_transcript", "")
+        if not text:
             return False
-        return self.copy_text(self._last_result)
+        ok = self.copy_text(text)
+        if ok and self._feedback is not None:
+            AppHelper.callAfter(self._feedback.show_message, "已复制到剪贴板")
+        return ok
 
     def get_recent_history(self, count: int = 20):
         if self.pipeline is None:
@@ -1707,36 +1731,10 @@ class VoiceInputApp:
             print(f"🕒 自动释放已设置为 {self.settings.auto_release_minutes} 分钟")
 
     def select_model(self, model_name: str):
-        if model_name == self.settings.current_model:
-            return
-        self._pipeline_transitioning = True
-        self._set_state("processing")
-        self._refresh_status_bar_details()
-        try:
-            self.settings.current_model = model_name
-            self.settings.save()
-            self._logger.info("切换模型：%s", model_name)
-            if self._rebuild_pipeline():
-                self._last_result = f"已切换模型：{model_name}"
-                print(f"🧠 已切换模型：{model_name}")
-                if self._floating_pill is not None:
-                    AppHelper.callAfter(self._floating_pill.update_state)
-        finally:
-            self._pipeline_transitioning = False
+        self.load_model_async(model_name)
 
     def reload_glossary(self):
-        """重载术语表：重新读取 glossary.txt 并重启 whisper-server 让新 --prompt 生效。"""
-        self._pipeline_transitioning = True
-        self._set_state("processing")
-        self._refresh_status_bar_details()
-        try:
-            terms = self.settings.get_glossary_terms()
-            self._logger.info("重载术语表：%d 条", len(terms))
-            if self._rebuild_pipeline():
-                self._last_result = f"已重载术语表（{len(terms)} 条）"
-                print(f"📖 已重载术语表（{len(terms)} 条），后端已重启")
-        finally:
-            self._pipeline_transitioning = False
+        self.load_model_async(self.settings.current_model, force=True)
 
     def edit_glossary(self):
         """用默认文本编辑器打开术语表；首次打开时写入格式说明头。"""
@@ -1754,32 +1752,20 @@ class VoiceInputApp:
             print(f"⚠️  打开术语表失败：{e}")
 
     def select_microphone(self, device_name: str | None):
+        if self._pipeline_transitioning or self._worker_busy or self._state in {"recording", "processing"}:
+            return
         if device_name == self.settings.audio_device_name:
             return
         self.settings.audio_device_name = device_name
-        self.settings.save()
-        self._logger.info("切换麦克风：%s", device_name or "default")
-        if self.pipeline is not None:
-            self.pipeline.config.audio.device_name = device_name
-            self.pipeline.audio_source.close()
-        self._refresh_status_bar_details()
-        print(f"🎙️ 已切换麦克风：{device_name or '系统默认'}")
+        self.load_model_async(self.settings.current_model, force=True)
 
     def select_language(self, language: str):
+        if self._pipeline_transitioning or self._worker_busy or self._state in {"recording", "processing"}:
+            return
         if language == self.settings.language:
             return
-        self._pipeline_transitioning = True
-        self._set_state("processing")
-        self._refresh_status_bar_details()
-        try:
-            self.settings.language = language
-            self.settings.save()
-            self._logger.info("切换识别语言：%s", language)
-            if self._rebuild_pipeline():
-                self._last_result = f"已切换语言：{language}"
-                print(f"🌐 已切换识别语言：{language}")
-        finally:
-            self._pipeline_transitioning = False
+        self.settings.language = language
+        self.load_model_async(self.settings.current_model, force=True)
 
     def select_chinese_script(self, script: str):
         if script == self.settings.chinese_script:
@@ -1836,6 +1822,8 @@ class VoiceInputApp:
         if self.pipeline is None:
             return
         if key == self._hotkey_target():
+            if self._active_trace is not None or self._state == "processing" or self._worker_busy:
+                return
             if self._pipeline_transitioning:
                 self._logger.info("按键按下忽略：后端重建中")
                 return
@@ -1877,6 +1865,10 @@ class VoiceInputApp:
                     self._handle_release(trace)
             except Exception:
                 self._logger.exception("dictation worker 处理 %s 异常", kind)
+                self._media_ducker.restore()
+                self._set_state("error")
+                if getattr(self, "_feedback", None) is not None:
+                    AppHelper.callAfter(self._feedback.show_message, "录音未完成，请重试")
             finally:
                 self._worker_busy = False
 
@@ -1951,19 +1943,25 @@ class VoiceInputApp:
         )
         self._logger.info("%s 按键释放：右Command（worker 处理）", trace.prefix("release") if trace else "[release]")
         if self.pipeline.is_recording:
-            self._logger.info("%s 开始等待后台唤醒", trace.prefix("release") if trace else "[release]")
-            self._wait_for_backend_warmup()
+            self._logger.info("%s 已停止采集，识别前确认后台就绪", trace.prefix("release") if trace else "[release]")
             if self.settings.dictation_mode == "preview" and self._live_dictation is not None:
                 self._live_dictation.stop()
             self._set_state("processing")
+            if getattr(self, "_feedback", None) is not None:
+                AppHelper.callAfter(self._feedback.show_message, "正在识别…", None)
             print("⏳ 转录中...")
             self._logger.info("%s 开始 stop_recording", trace.prefix("stop_recording") if trace else "[stop_recording]")
 
             try:
-                paste_output = self.settings.dictation_mode == "quick"
+                # Live preview was removed from the default product flow. Keep
+                # legacy preview configs safe by delivering the final result
+                # once on release instead of silently dropping the text.
+                paste_output = True
                 result = self.pipeline.stop_recording(paste_output=paste_output)
             except Exception as e:
                 self._logger.exception("stop_recording 异常")
+                if getattr(self, "_feedback", None) is not None:
+                    AppHelper.callAfter(self._feedback.show_message, "识别未完成，请重试")
                 self._last_result = f"错误：{e}"
                 self._media_ducker.restore()
                 self._set_state("error")
@@ -1973,6 +1971,14 @@ class VoiceInputApp:
                 return
 
             self._log_perf(result, trace)
+            if getattr(self, "_feedback", None) is not None:
+                delivery = getattr(self.pipeline.clipboard, "last_delivery", "none")
+                message = ("未检测到语音" if result.no_speech else
+                           "已复制到剪贴板" if delivery == "copied" else
+                           "已发送到输入光标" if delivery == "sent" else
+                           "复制失败，可从菜单栏复制最近结果" if result.success else
+                           "录音未完成，请按住快捷键说话")
+                AppHelper.callAfter(self._feedback.show_message, message)
             overflow = self.pipeline.audio_source.overflow
             if result.success:
                 no_speech = bool(getattr(result, "no_speech", False))
@@ -1995,8 +2001,7 @@ class VoiceInputApp:
                     print(f"⏱️  录音：{result.recording_duration:.2f}秒 → ✅ {result.processing_time:.2f}秒 (RTF: {result.rtf:.2f}x)")
                     print(f"   「{result.text}」")
                     self._last_result = result.text
-                if self._floating_pill is not None:
-                    AppHelper.callAfter(self._floating_pill.on_transcription_completed, self._last_result)
+                    self._last_transcript = result.text
                 if overflow:
                     print(f"   ⚠️ 已达最大录音时长 {self.settings.max_recording_seconds:.0f}s，超出部分已截断")
                     self._logger.warning(
@@ -2061,27 +2066,7 @@ class VoiceInputApp:
             print(f"❌ 打开下载页失败：{e}")
 
     def reload_model(self):
-        """在首次放入模型后，从菜单栏加载当前选中的模型。"""
-        if self.pipeline is not None and self.pipeline.is_recording:
-            self._show_simple_alert("暂时无法加载模型", "请先结束当前录音。")
-            return
-
-        self._pipeline_transitioning = True
-        self._set_state("processing")
-        self._refresh_status_bar_details()
-        try:
-            if self._rebuild_pipeline():
-                self._last_result = f"已加载模型：{self.settings.current_model}"
-                print(f"🧠 已加载模型：{self.settings.current_model}")
-            else:
-                self._show_simple_alert(
-                    "模型尚未加载",
-                    f"找不到：{self.settings.get_model_path()}\n\n"
-                    "请先把 GGML 模型放入模型目录，再重试。",
-                )
-        finally:
-            self._pipeline_transitioning = False
-            self._refresh_status_bar_details()
+        self.load_model_async(self.settings.current_model, force=True)
 
     def _first_char_ms(self):
         """预览模式下首字延迟（ms）；非预览/未产生返回 None。"""
@@ -2252,6 +2237,8 @@ class VoiceInputApp:
 
         # 首次启动向导在事件循环准备好后弹出，避免阻塞初始化和热键监听。
         AppHelper.callAfter(self.show_onboarding_if_needed)
+        if self.settings.model_exists():
+            AppHelper.callAfter(self.load_model_async, self.settings.current_model)
         # 权限 API 可能触发系统授权 UI，不能在进入 NSRunLoop 前同步调用；否则
         # 首次启动会卡在权限请求，向导和菜单栏都无法出现。
         AppHelper.callAfter(self._print_permission_guidance_if_needed)
@@ -2271,10 +2258,23 @@ class VoiceInputApp:
         self._term_delegate = _AppDelegate.alloc().init()
         self._term_delegate._app_ref = self  # 强引用持有，防 PyObjC 弱引用回收
         app.setDelegate_(self._term_delegate)
+        main_menu = AppKit.NSMenu.alloc().init()
+        root_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("WhisperCppCmd", None, "")
+        app_menu = AppKit.NSMenu.alloc().init()
+        root_item.setSubmenu_(app_menu)
+        main_menu.addItem_(root_item)
+        for title, action, key in (("打开 WhisperCppCmd…", "openDashboard:", ","), ("关闭窗口", "performClose:", "w"), ("退出 WhisperCppCmd", "quitApp:", "q")):
+            menu_item = app_menu.addItemWithTitle_action_keyEquivalent_(title, action, key)
+            if action != "performClose:":
+                menu_item.setTarget_(self.status_bar)
+        app.setMainMenu_(main_menu)
+        AppHelper.callLater(2.0, self.status_bar.log_screen_position)
 
         self._logger.info("应用已启动，进入事件循环")
         if self._model_setup_required:
             print("\n⚠️  App 已启动，但尚未加载模型；请先放入模型并从菜单栏重新加载")
+        elif self.pipeline is None or not self.pipeline.is_initialized:
+            print("\n⏳ App 已启动，模型正在后台加载")
         else:
             print("\n✅ 就绪，菜单栏图标已显示，按住右 Command 开始录音")
         print("   使用菜单栏图标或 Ctrl+C 退出\n")
@@ -2301,6 +2301,8 @@ class VoiceInputApp:
 
         # 锁外执行耗时清理（worker join / _stop_server wait），避免与 watchdog 互相死锁
         self._logger.info("开始关闭应用")
+        if getattr(self, "_model_download", None) is not None:
+            self._model_download.cancel()
         if self._sleep_wake_observer is not None:
             try:
                 AppKit.NSWorkspace.sharedWorkspace().notificationCenter().removeObserver_(self._sleep_wake_observer)
@@ -2332,7 +2334,10 @@ class VoiceInputApp:
             self._dictation_worker = None
             self._dictation_queue = None
 
-        if self.pipeline:
+        loader = getattr(self, "_model_loader_thread", None)
+        if loader is not None and loader.is_alive():
+            loader.join(timeout=2.0)
+        if self.pipeline and not (loader is not None and loader.is_alive()):
             self.pipeline.shutdown()
 
         self._refresh_status_bar_details()

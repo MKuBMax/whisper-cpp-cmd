@@ -36,6 +36,9 @@ class Clipboard:
     
     def __init__(self, config: Optional[ClipboardConfig] = None):
         self.config = config or ClipboardConfig()
+        self.last_delivery = "none"
+        self._recording_target = None
+        self._target_captured = False
         self._private_event_source = Quartz.CGEventSourceCreate(
             Quartz.kCGEventSourceStatePrivate
         )
@@ -492,63 +495,76 @@ class Clipboard:
             logger.warning("粘贴失败：%s", e)
             return False
     
-    def insert(self, text: str, delay: Optional[float] = None) -> bool:
-        """
-        复制并粘贴文本
-        
-        Args:
-            text: 要插入的文本
-            delay: 粘贴前延迟
-        
-        Returns:
-            是否成功
-        """
-        if not text:
+    def editable_target(self):
+        """Return a verified editable focus, never infer a cursor from the app name."""
+        try:
+            app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            if app is None:
+                return None
+            status, element = self._get_focused_ui_element()
+            if status != 0 or element is None:
+                return None
+            _, role = self._ax_copy_attribute_value(element, "AXRole")
+            _, subrole = self._ax_copy_attribute_value(element, "AXSubrole")
+            if subrole == "AXSecureTextField":
+                return None
+            status, writable = self._ax_is_attribute_settable(element, "AXSelectedText")
+            value_status, value_writable = self._ax_is_attribute_settable(element, "AXValue")
+            _, selected_range = self._ax_copy_attribute_value(element, "AXSelectedTextRange")
+            if ((status == 0 and writable)
+                    or (value_status == 0 and value_writable
+                        and (role in {"AXTextField", "AXTextArea", "AXComboBox"}
+                             or selected_range is not None))
+                    or (role == "AXTextArea" and selected_range is not None
+                        and self._is_terminal_app(app.bundleIdentifier() or ""))):
+                return (app.processIdentifier(), element)
+        except Exception:
+            logger.debug("无法确认可编辑光标", exc_info=True)
+        return None
+
+    def capture_target(self):
+        self.last_delivery = "none"
+        self._recording_target = self.editable_target()
+        self._target_captured = True
+
+    @staticmethod
+    def _same_accessibility_target(left, right):
+        """Compare AX elements without turning a failed comparison into lost text."""
+        if left is right:
+            return True
+        try:
+            return bool(CoreFoundation.CFEqual(left, right))
+        except Exception:
+            logger.debug("无法比较录音前后的 AX 输入目标", exc_info=True)
             return False
 
-        frontmost_app = self._get_frontmost_app_name()
-        bundle_id = self._get_frontmost_app_bundle_id()
-        copied = self.copy(text)
+    def insert(self, text: str, delay: Optional[float] = None) -> bool:
+        """Keep a clipboard copy; paste only into the verified recording target.
 
-        if bundle_id == "com.googlecode.iterm2":
-            try:
-                if self._insert_text_via_iterm2(text):
-                    logger.info(
-                        "插入成功：frontmost_app=%s bundle_id=%s mode=iterm2_write_text",
-                        frontmost_app,
-                        bundle_id,
-                    )
-                    return True
-            except Exception as e:
-                logger.warning("iTerm2 专用插入失败：%s", e)
-
-        if self._is_browser_app(bundle_id) or self._is_terminal_app(bundle_id):
-            try:
-                self._type_text_with_cg_event(text, delay)
-                logger.info(
-                    "插入成功：frontmost_app=%s bundle_id=%s mode=unicode_typing",
-                    frontmost_app,
-                    bundle_id,
-                )
-                return True
-            except Exception as e:
-                logger.warning("Unicode 键盘输入失败：%s", e)
-
-        if copied and self._paste_via_cgevent_fallback(delay):
+        Sending an event is not proof that an application accepted the text.
+        last_delivery distinguishes a paste request from clipboard fallback.
+        """
+        self.last_delivery = "failed"
+        if not text or not self.copy(text):
+            return False
+        self.last_delivery = "copied"
+        target = self.editable_target()
+        if target is None:
+            return False
+        if self._target_captured:
+            original = self._recording_target
+            if (original is None or target[0] != original[0]
+                    or not self._same_accessibility_target(target[1], original[1])):
+                return False
+        # A single paste avoids per-character interleaving, unicode truncation,
+        # and duplicate insertion from speculative fallback chains.
+        try:
+            if delay:
+                time.sleep(delay)
+            self._paste_with_cg_event()
+            self.last_delivery = "sent"
+            logger.info("已向确认的输入框发送粘贴请求")
             return True
-
-        if copied and self._paste_via_preferred_mode(delay):
-            return True
-
-        if not self._is_browser_app(bundle_id) and not self._is_terminal_app(bundle_id) and self._insert_text_directly(text):
-            logger.info("系统级粘贴失败后，直接插入成功")
-            return True
-
-        logger.info(
-            "插入失败：frontmost_app=%s bundle_id=%s copied=%s",
-            frontmost_app,
-            bundle_id,
-            copied,
-        )
-
-        return False
+        except Exception:
+            logger.warning("粘贴请求失败，文字保留在剪贴板", exc_info=True)
+            return False

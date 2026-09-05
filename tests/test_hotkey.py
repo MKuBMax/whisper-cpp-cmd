@@ -64,3 +64,28 @@ def test_all_labels_have_valid_pynput_keys():
     assert set(_HOTKEY_LABELS) == set(_HOTKEY_KEYS)
     for key in _HOTKEY_KEYS.values():
         assert key is not None
+
+
+def test_processing_does_not_queue_delayed_recording():
+    import queue
+    app = _make_app()
+    app._paused = False
+    app.pipeline = object()
+    app._active_trace = None
+    app._state = "processing"
+    app._dictation_queue = queue.Queue()
+    app._on_press(keyboard.Key.cmd_r)
+    assert app._dictation_queue.empty()
+
+
+def test_repeat_press_keeps_original_release_trace():
+    import queue
+    app = _make_app()
+    app._paused = False
+    app.pipeline = object()
+    original = object()
+    app._active_trace = original
+    app._dictation_queue = queue.Queue()
+    app._on_press(keyboard.Key.cmd_r)
+    assert app._active_trace is original
+    assert app._dictation_queue.empty()

@@ -110,7 +110,7 @@ class Settings:
     auto_paste: bool = True
     paste_delay: float = 0.03
     chinese_script: str = "simplified"
-    dictation_mode: str = "preview"
+    dictation_mode: str = "quick"
     transcription_prompt: str = "请使用中文标点符号输出，句子尽量完整自然。数值与数量请用阿拉伯数字表示。"
     glossary_file: str = ""  # 术语表路径；留空则用项目根 glossary.txt（每行一个专有名词/术语）
     update_check_enabled: bool = True
@@ -123,9 +123,11 @@ class Settings:
     history_max_entries: int = 100
     onboarding_completed: bool = False
     show_in_dock: bool = True  # 同时在 Dock 栏显示图标（防刘海屏/菜单栏隐藏工具折叠丢失）
-    show_floating_pill: bool = True  # 在桌面常驻显示交互悬浮胶囊（防刘海遮挡，支持点击录音、右键菜单、拖拽）
-    status_bar_show_title: bool = True  # 状态栏图标附带状态文字（撑开宽度防刘海挤压）
+    show_floating_pill: bool = False  # 旧配置兼容，常驻胶囊已移除
+    status_bar_show_title: bool = False  # 旧配置兼容，菜单栏固定为图标
     
+    experience_version: int = 1
+
     # 日志配置
     verbose: bool = True
     
@@ -164,10 +166,10 @@ class Settings:
         self.dictation_mode = (
             self.dictation_mode.strip().lower()
             if isinstance(self.dictation_mode, str)
-            else "preview"
+            else "quick"
         )
         if self.dictation_mode not in {"preview", "quick"}:
-            self.dictation_mode = "preview"
+            self.dictation_mode = "quick"
 
         for name, default in (
             ("duck_media", True),
@@ -180,10 +182,12 @@ class Settings:
             ("verbose", True),
             ("use_vad", False),
             ("show_in_dock", True),
-            ("show_floating_pill", True),
-            ("status_bar_show_title", True),
+            ("show_floating_pill", False),
+            ("status_bar_show_title", False),
         ):
             setattr(self, name, _coerce_bool(getattr(self, name, default), default))
+
+        self.experience_version = _coerce_int(self.experience_version, 1, 0, 10_000)
 
         # The recorder/pipeline contract is fixed at 16 kHz.  Treat this legacy
         # field as a compatibility value rather than allowing a malformed or
@@ -236,6 +240,16 @@ class Settings:
                             setattr(settings, key, value)
                 # 允许配置文件用空字符串表示「使用当前运行环境默认值」，也兼容
                 # 旧机器上保存的 Homebrew 路径在分发 App 中不存在的情况。
+                try:
+                    experience_version = int(data.get("experience_version", 0) or 0)
+                except (TypeError, ValueError):
+                    experience_version = 0
+                if experience_version < 1:
+                    settings.dictation_mode = "quick"
+                    settings.auto_paste = True
+                    settings.show_floating_pill = False
+                    settings.status_bar_show_title = False
+                    settings.experience_version = 1
                 settings.__post_init__()
                 if not os.path.exists(settings.whisper_cli_path):
                     settings.whisper_cli_path = default_whisper_cli_path()
@@ -314,17 +328,30 @@ class Settings:
     
     def model_exists(self, model_name: Optional[str] = None) -> bool:
         """检查模型文件是否存在"""
-        return os.path.exists(self.get_model_path(model_name))
+        path = self.get_model_path(model_name)
+        try:
+            return os.path.isfile(path) and os.path.getsize(path) > 0
+        except OSError:
+            return False
     
     def list_available_models(self) -> list:
         """列出可用的模型"""
         models = []
-        if os.path.exists(self.models_dir):
-            for filename in os.listdir(self.models_dir):
-                if filename.startswith('ggml-') and filename.endswith('.bin'):
-                    name = filename[5:-4]
-                    models.append(name)
-        return models
+        try:
+            filenames = os.listdir(self.models_dir)
+        except OSError:
+            return models
+        for filename in filenames:
+            if (filename.startswith('ggml-') and filename.endswith('.bin')
+                    and not filename.startswith('ggml-silero-')):
+                try:
+                    if os.path.getsize(os.path.join(self.models_dir, filename)) <= 0:
+                        continue
+                except OSError:
+                    continue
+                name = filename[5:-4]
+                models.append(name)
+        return sorted(models)
     
     def get_audio_device_index(self) -> Optional[int]:
         """根据设备名称获取当前索引（解决设备索引飘移问题）"""

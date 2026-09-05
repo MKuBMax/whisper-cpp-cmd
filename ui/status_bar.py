@@ -80,352 +80,60 @@ class StatusBarController(NSObject):
         return self
 
     def _setup_status_item(self):
-        self.status_item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(
-            _STATUS_ITEM_LENGTH
-        )
-        if self.status_item is None:
-            self._log_warning("创建 macOS 菜单栏状态项失败：NSStatusBar 返回 None")
-            return
-
-        self.status_item.setHighlightMode_(True)
-        # 不允许用户通过状态项的可移除行为把唯一入口删掉。0 是 AppKit 的
-        # standard behavior；这里只是明确关闭 removalAllowed/terminationOnRemoval。
-        if hasattr(self.status_item, "setBehavior_"):
-            self.status_item.setBehavior_(0)
+        self.status_item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(28.0)
+        self.status_item.setBehavior_(0)
+        self.status_item.setAutosaveName_("WhisperCppCmd.StatusItem")
         self.status_item.setVisible_(True)
-
-        button = self.status_item.button()
-        self._configure_status_button(button)
-
+        self._configure_status_button(self.status_item.button())
         self._load_icons()
-        self.setState_("idle")
-
         self.status_menu = AppKit.NSMenu.alloc().init()
         self.status_menu.setDelegate_(self)
-        self.dashboard_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "控制中心…",
-            "openDashboard:",
-            "d",
-        )
-        self.dashboard_item.setTarget_(self)
-        self.status_title_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "状态：空闲",
-            None,
-            ""
-        )
-        self.status_title_item.setEnabled_(False)
+        self.preferences_menu = AppKit.NSMenu.alloc().init()
+
+        def item(menu, attr, title, action=None, key=""):
+            value = menu.addItemWithTitle_action_keyEquivalent_(title, action, key)
+            value.setTarget_(self)
+            if action is None:
+                value.setEnabled_(False)
+            setattr(self, attr, value)
+            return value
+
+        def submenu(attr, title, menu_attr):
+            value = item(self.preferences_menu, attr, title)
+            value.setEnabled_(True)
+            menu = AppKit.NSMenu.alloc().init()
+            value.setSubmenu_(menu)
+            setattr(self, menu_attr, menu)
+
+        item(self.status_menu, "status_title_item", "按住右 Command 开始录音")
+        item(self.status_menu, "dashboard_item", "打开 WhisperCppCmd…", "openDashboard:", ",")
         self.status_menu.addItem_(AppKit.NSMenuItem.separatorItem())
-
-        self.model_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "模型：-",
-            None,
-            ""
-        )
-        self.model_item.setEnabled_(False)
-
-        self.model_menu_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "切换模型",
-            None,
-            ""
-        )
-        self.model_submenu = AppKit.NSMenu.alloc().init()
-        self.model_menu_item.setSubmenu_(self.model_submenu)
-        self.status_menu.addItem_(self.model_menu_item)
-        self.setModelOptions_([])
-
-        self.mic_menu_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "麦克风",
-            None,
-            ""
-        )
-        self.mic_submenu = AppKit.NSMenu.alloc().init()
-        self.mic_menu_item.setSubmenu_(self.mic_submenu)
-        self.status_menu.addItem_(self.mic_menu_item)
-        self.setMicOptions_([])
-
-        self.language_menu_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "识别语言",
-            None,
-            ""
-        )
-        self.language_submenu = AppKit.NSMenu.alloc().init()
-        self.language_menu_item.setSubmenu_(self.language_submenu)
-        self.status_menu.addItem_(self.language_menu_item)
-        self.setLanguageOptions_([])
-
-        self.chinese_script_menu_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "中文脚本",
-            None,
-            ""
-        )
-        self.chinese_script_submenu = AppKit.NSMenu.alloc().init()
-        self.chinese_script_menu_item.setSubmenu_(self.chinese_script_submenu)
-        self.status_menu.addItem_(self.chinese_script_menu_item)
-        self.setChineseScriptOptions_([])
-
-        self.dictation_mode_menu_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "听写模式",
-            None,
-            ""
-        )
-        self.dictation_mode_submenu = AppKit.NSMenu.alloc().init()
-        self.dictation_mode_menu_item.setSubmenu_(self.dictation_mode_submenu)
-        self.status_menu.addItem_(self.dictation_mode_menu_item)
-        self.setDictationModeOptions_([])
-
-        self.hotkey_menu_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "热键",
-            None,
-            ""
-        )
-        self.hotkey_submenu = AppKit.NSMenu.alloc().init()
-        self.hotkey_menu_item.setSubmenu_(self.hotkey_submenu)
-        self.status_menu.addItem_(self.hotkey_menu_item)
-        self.setHotkeyOptions_([])
-
-        self.accessibility_permission_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "辅助功能权限：检查中…",
-            "checkAccessibility:",
-            ""
-        )
-        self.accessibility_permission_item.setTarget_(self)
-
-        self.input_monitoring_permission_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "输入监控权限：检查中…",
-            "checkInputMonitoring:",
-            ""
-        )
-        self.input_monitoring_permission_item.setTarget_(self)
-
-        self.auto_paste_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "自动粘贴",
-            "toggleAutoPaste:",
-            ""
-        )
-        self.auto_paste_item.setTarget_(self)
-
-        self.login_at_startup_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "开机启动",
-            "toggleLoginAtStartup:",
-            ""
-        )
-        self.login_at_startup_item.setTarget_(self)
-        self.setLoginAtStartup_(login_item.is_enabled())
-
-        self.vad_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "VAD 静音裁剪",
-            "toggleVad:",
-            ""
-        )
-        self.vad_item.setTarget_(self)
-
-        self.duck_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "录音压低音量",
-            None,
-            ""
-        )
-        self.duck_submenu = AppKit.NSMenu.alloc().init()
-        self.duck_item.setSubmenu_(self.duck_submenu)
-        self.status_menu.addItem_(self.duck_item)
-        self.duck_enable_item = self.duck_submenu.addItemWithTitle_action_keyEquivalent_(
-            "启用",
-            "toggleDuckMedia:",
-            ""
-        )
-        self.duck_enable_item.setTarget_(self)
-        self.duck_headphones_item = self.duck_submenu.addItemWithTitle_action_keyEquivalent_(
-            "戴耳机时也压低",
-            "toggleDuckHeadphones:",
-            ""
-        )
-        self.duck_headphones_item.setTarget_(self)
-
-        # 录音浮窗：启用 / 外观 / 跟随鼠标 统一收入二级菜单（对齐「录音压低音量」结构）
-        self.overlay_menu_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "录音浮窗",
-            None,
-            ""
-        )
-        self.overlay_submenu = AppKit.NSMenu.alloc().init()
-        self.overlay_menu_item.setSubmenu_(self.overlay_submenu)
-        self.status_menu.addItem_(self.overlay_menu_item)
-
-        self.overlay_item = self.overlay_submenu.addItemWithTitle_action_keyEquivalent_(
-            "启用",
-            "toggleOverlay:",
-            ""
-        )
-        self.overlay_item.setTarget_(self)
-
-        self.overlay_follow_mouse_item = self.overlay_submenu.addItemWithTitle_action_keyEquivalent_(
-            "浮窗跟随鼠标",
-            "toggleOverlayFollowMouse:",
-            ""
-        )
-        self.overlay_follow_mouse_item.setTarget_(self)
-
-        self.edit_glossary_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "编辑术语表…",
-            "editGlossary:",
-            ""
-        )
-        self.edit_glossary_item.setTarget_(self)
-
-        self.reload_glossary_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "重载术语表（重启后端）",
-            "reloadGlossary:",
-            ""
-        )
-        self.reload_glossary_item.setTarget_(self)
-
-        self.backend_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "后端：-",
-            None,
-            ""
-        )
-        self.backend_item.setEnabled_(False)
-
-        self.last_result_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "最近结果：无",
-            None,
-            ""
-        )
-        self.last_result_item.setEnabled_(False)
-
-        self.status_menu.addItem_(AppKit.NSMenuItem.separatorItem())
-
-        self.pause_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "暂停监听",
-            "togglePause:",
-            ""
-        )
-        self.pause_item.setTarget_(self)
-
-        self.release_backend_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "释放后端资源",
-            "releaseBackend:",
-            ""
-        )
-        self.release_backend_item.setTarget_(self)
-
-        self.auto_release_menu_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "自动释放",
-            None,
-            ""
-        )
-        self.auto_release_submenu = AppKit.NSMenu.alloc().init()
-        self.auto_release_menu_item.setSubmenu_(self.auto_release_submenu)
-        self.status_menu.addItem_(self.auto_release_menu_item)
-        self.setAutoReleaseMinutes_(10)
-
-        self.auto_release_countdown_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "剩余自动释放：-",
-            None,
-            ""
-        )
-        self.auto_release_countdown_item.setEnabled_(False)
-
-        self.copy_last_result_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "复制最近结果",
-            "copyLastResult:",
-            ""
-        )
-        self.copy_last_result_item.setTarget_(self)
+        item(self.status_menu, "copy_last_result_item", "复制最近结果", "copyLastResult:")
         self.copy_last_result_item.setEnabled_(False)
-
-        self.history_menu_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "最近历史",
-            None,
-            ""
-        )
-        self.history_submenu = AppKit.NSMenu.alloc().init()
-        self.history_menu_item.setSubmenu_(self.history_submenu)
-        self.status_menu.addItem_(self.history_menu_item)
-        self.setHistoryItems_([])
-
+        item(self.status_menu, "pause_item", "暂停监听", "togglePause:")
+        preferences = item(self.status_menu, "settings_item", "输入偏好")
+        preferences.setSubmenu_(self.preferences_menu)
+        preferences.setEnabled_(True)
+        submenu("mic_menu_item", "麦克风", "mic_submenu")
+        submenu("language_menu_item", "识别语言", "language_submenu")
+        submenu("chinese_script_menu_item", "中文输出", "chinese_script_submenu")
+        submenu("hotkey_menu_item", "录音快捷键", "hotkey_submenu")
+        item(self.preferences_menu, "login_at_startup_item", "登录时启动", "toggleLoginAtStartup:")
+        item(self.preferences_menu, "show_in_dock_item", "在 Dock 显示", "toggleShowInDock:")
+        item(self.preferences_menu, "overlay_item", "显示录音浮窗", "toggleOverlay:")
+        item(self.preferences_menu, "duck_enable_item", "录音时降低其他声音", "toggleDuckMedia:")
+        item(self.preferences_menu, "edit_glossary_item", "编辑术语表…", "editGlossary:")
+        item(self.preferences_menu, "reload_glossary_item", "应用术语表", "reloadGlossary:")
         self.status_menu.addItem_(AppKit.NSMenuItem.separatorItem())
-
-        show_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "显示状态",
-            "showStatus:",
-            ""
-        )
-        show_item.setTarget_(self)
-
-        self.onboarding_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "欢迎与权限引导…",
-            "openOnboarding:",
-            ""
-        )
-        self.onboarding_item.setTarget_(self)
-
-        self.settings_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "打开设置…",
-            "openSettings:",
-            ""
-        )
-        self.settings_item.setTarget_(self)
-
-        self.show_in_dock_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "在 Dock 栏显示图标",
-            "toggleShowInDock:",
-            ""
-        )
-        self.show_in_dock_item.setTarget_(self)
-
-        self.show_floating_pill_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "在桌面显示悬浮胶囊",
-            "toggleFloatingPill:",
-            ""
-        )
-        self.show_floating_pill_item.setTarget_(self)
-
-        self.status_bar_title_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "菜单栏图标显示状态文字",
-            "toggleStatusBarTitle:",
-            ""
-        )
-        self.status_bar_title_item.setTarget_(self)
-
-        reanchor_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "重新挂载菜单栏图标 🔄",
-            "reanchorStatusBar:",
-            ""
-        )
-        reanchor_item.setTarget_(self)
-
-        self.stats_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "统计面板…",
-            "showStats:",
-            ""
-        )
-        self.stats_item.setTarget_(self)
-
-        self.update_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "检查更新…",
-            "checkForUpdates:",
-            ""
-        )
-        self.update_item.setTarget_(self)
-
-        export_diagnostic_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "导出诊断报告",
-            "exportDiagnostic:",
-            ""
-        )
-        export_diagnostic_item.setTarget_(self)
-
-        quit_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
-            "退出",
-            "quitApp:",
-            "q"
-        )
-        quit_item.setTarget_(self)
-
+        item(self.status_menu, "update_item", "检查更新…", "checkForUpdates:")
+        item(self.status_menu, "export_diagnostic_item", "导出诊断报告…", "exportDiagnostic:")
+        item(self.status_menu, "quit_item", "退出 WhisperCppCmd", "quitApp:", "q")
         self.status_item.setMenu_(self.status_menu)
-        # Attach the menu before the final visibility assertion.  Some macOS
-        # releases re-layout a newly-created item when its menu is assigned.
+        if hasattr(self.status_item, "setLength_"):
+            self.status_item.setLength_(28.0)
         self.status_item.setVisible_(True)
+        self._configure_status_button(self.status_item.button())
+        self.setState_("idle")
 
     def _load_icons(self):
         # 优先加载本地 22x22 Retina 模板图片，确保在任何第三方菜单栏管理器下尺寸与渲染 100% 确定
@@ -521,35 +229,10 @@ class StatusBarController(NSObject):
 
         image = self.icons.get(state) or self.icons.get("idle")
 
-        show_title = True
-        if self.app and hasattr(self.app, "settings"):
-            show_title = getattr(self.app.settings, "status_bar_show_title", True)
+        button.setTitle_("" if image is not None else "录")
+        button.setImage_(image)
+        button.setImagePosition_(AppKit.NSImageOnly if image is not None else AppKit.NSNoImage)
 
-        title_suffix_map = {
-            "idle": " 语音",
-            "recording": " 录音中",
-            "processing": " 转写中",
-            "error": " 错误",
-            "paused": " 暂停",
-        }
-        suffix = title_suffix_map.get(state, " 语音")
-
-        if show_title:
-            button.setTitle_(suffix)
-            if image is not None:
-                button.setImage_(image)
-                button.setImagePosition_(AppKit.NSImageLeft)
-            else:
-                button.setTitle_(f"🎙️{suffix}")
-                button.setImagePosition_(AppKit.NSNoImage)
-        else:
-            button.setTitle_("")
-            if image is not None:
-                button.setImage_(image)
-                button.setImagePosition_(AppKit.NSImageOnly)
-            else:
-                button.setTitle_("🎙️")
-                button.setImagePosition_(AppKit.NSNoImage)
 
     def setModelName_(self, model_name):
         if self.model_item is not None:
@@ -829,6 +512,13 @@ class StatusBarController(NSObject):
 
     def menuWillOpen_(self, menu):
         self.app.refresh_accessibility_permission_status()
+        permissions = self.app.get_permission_status()
+        if self.app.pipeline is None:
+            self.status_title_item.setTitle_("请先下载或加载模型")
+        elif not all(permissions.get(k) for k in ("microphone", "accessibility")):
+            self.status_title_item.setTitle_("需要允许系统权限")
+        else:
+            self.setState_(self.app._state)
 
     def exportDiagnostic_(self, sender):
         self.app.export_diagnostic_report()
@@ -860,20 +550,6 @@ class StatusBarController(NSObject):
     def openDashboard_(self, sender):
         if self.app and hasattr(self.app, "open_dashboard"):
             self.app.open_dashboard()
-
-    def toggleFloatingPill_(self, sender):
-        if self.app and hasattr(self.app, "toggle_floating_pill"):
-            self.app.toggle_floating_pill()
-
-    def toggleStatusBarTitle_(self, sender):
-        if self.app and hasattr(self.app, "toggle_status_bar_title"):
-            self.app.toggle_status_bar_title()
-
-    def reanchorStatusBar_(self, sender):
-        if self.app and hasattr(self.app, "reanchor_status_bar"):
-            self.app.reanchor_status_bar()
-        else:
-            self.reanchor()
 
     def checkAccessibility_(self, sender):
         self.app.check_accessibility_permission()
@@ -931,6 +607,9 @@ class StatusBarController(NSObject):
     def selectLanguage_(self, sender):
         self.app.select_language(str(sender.representedObject()))
 
+    def selectChineseScript_(self, sender):
+        self.app.select_chinese_script(str(sender.representedObject()))
+
     def selectDictationMode_(self, sender):
         self.app.select_dictation_mode(str(sender.representedObject()))
 
@@ -946,14 +625,14 @@ class StatusBarController(NSObject):
         self.app.shutdown()
 
     @objc.python_method
-    def reanchor(self):
-        """重新向系统申请并挂载状态栏项。"""
-        if self.status_item is not None:
-            try:
-                AppKit.NSStatusBar.systemStatusBar().removeStatusItem_(self.status_item)
-            except Exception:
-                pass
-            self.status_item = None
-        self._setup_status_item()
-        if self.app is not None and hasattr(self.app, "_refresh_status_bar_details"):
-            self.app._refresh_status_bar_details()
+    def log_screen_position(self):
+        button = self.status_item.button()
+        window = button.window() if button is not None else None
+        if window is not None and self._logger is not None:
+            self._logger.info(
+                "菜单栏状态项：visible=%s button_hidden=%s button_frame=%s window_frame=%s",
+                self.status_item.isVisible(),
+                button.isHidden(),
+                button.frame(),
+                window.frame(),
+            )

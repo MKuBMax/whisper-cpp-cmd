@@ -80,6 +80,7 @@ class Pipeline:
     
     def __init__(self, config: Optional[PipelineConfig] = None):
         self.config = config or PipelineConfig()
+        self.before_transcribe = None
         
         self.audio_source = AudioSource(self.config.audio)
         self.recorder = Recorder(
@@ -188,6 +189,7 @@ class Pipeline:
             return False
         
         logger.info("开始录音")
+        self.clipboard.capture_target()
         self.audio_source.start_recording()
         self.recorder.start()
         if isinstance(trace, DictationTrace):
@@ -268,6 +270,8 @@ class Pipeline:
             if isinstance(trace, DictationTrace):
                 logger.info("%s pre_process done elapsed=%.2fs", trace.prefix("pre_process"), time.time() - process_start)
             
+            if getattr(self, "before_transcribe", None) is not None:
+                self.before_transcribe()
             transcribe_start = time.time()
             result = self.model_engine.transcribe(processed_audio, trace=trace)
             logger.info("模型转录完成：elapsed=%.2fs success=%s", time.time() - transcribe_start, result.success)

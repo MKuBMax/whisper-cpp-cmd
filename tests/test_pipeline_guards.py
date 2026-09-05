@@ -68,3 +68,15 @@ def test_empty_model_result_is_no_speech_and_is_not_pasted_or_saved(tmp_path):
     assert result.no_speech is True
     assert pasted == []
     assert not (tmp_path / "history.json").exists()
+
+
+def test_capture_stops_before_waiting_for_model():
+    pipeline = _pipeline_for_audio(np.full(16_000, 0.02, dtype=np.float32))
+    events = []
+    pipeline.recorder.stop = lambda: events.append("stop recorder")
+    pipeline.audio_source.stop_recording = lambda: (events.append("stop microphone") or np.full(16_000, 0.02, dtype=np.float32))
+    pipeline.before_transcribe = lambda: events.append("wait for model")
+    pipeline.model_engine.transcribe = lambda *a, **k: (events.append("transcribe") or SimpleNamespace(
+        text="", model_name="large-v3", success=True, error=None, rtf=0.1))
+    pipeline.stop_recording()
+    assert events[:4] == ["stop recorder", "stop microphone", "wait for model", "transcribe"]

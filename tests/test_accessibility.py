@@ -236,8 +236,9 @@ def test_permission_repair_guidance_does_not_show_modal_alert(monkeypatch, caplo
 
 def test_onboarding_reopens_when_core_permission_is_missing(monkeypatch):
     app = VoiceInputApp.__new__(VoiceInputApp)
-    app.settings = type("Settings", (), {"onboarding_completed": True})()
+    app.settings = type("Settings", (), {"onboarding_completed": True, "model_exists": lambda self: True})()
     app._onboarding_window = None
+    app._dashboard_window = None
     app._check_accessibility_permission = lambda: False
     app.get_permission_status = lambda: {
         "microphone": True,
@@ -258,7 +259,7 @@ def test_onboarding_reopens_when_core_permission_is_missing(monkeypatch):
         def show(self):
             shown.append(True)
 
-    monkeypatch.setattr("app.controller.OnboardingWindowController", FakeOnboarding)
+    monkeypatch.setattr("app.controller.DashboardWindowController", FakeOnboarding)
 
     app.show_onboarding_if_needed()
 
@@ -268,6 +269,7 @@ def test_onboarding_reopens_when_core_permission_is_missing(monkeypatch):
 def test_open_onboarding_allocates_and_shows_window(monkeypatch):
     app = VoiceInputApp.__new__(VoiceInputApp)
     app._onboarding_window = None
+    app._dashboard_window = None
     shown = []
 
     class FakeOnboarding:
@@ -282,7 +284,7 @@ def test_open_onboarding_allocates_and_shows_window(monkeypatch):
         def show(self):
             shown.append(True)
 
-    monkeypatch.setattr("app.controller.OnboardingWindowController", FakeOnboarding)
+    monkeypatch.setattr("app.controller.DashboardWindowController", FakeOnboarding)
     app.open_onboarding()
     assert shown == [True]
     assert app._onboarding_window is not None
@@ -299,9 +301,9 @@ def test_onboarding_skip_marks_completed_and_orders_out():
 
     controller = OnboardingWindowController.alloc().initWithApp_(fake_app)
     controller.window = fake_window
-    controller.skipOnboarding_(None)
+    controller.windowWillClose_(None)
 
     assert fake_settings.onboarding_completed is True
     assert saved == [True]
-    assert ordered_out == [None]
+    assert ordered_out == []  # Closing never opens another window.
 
