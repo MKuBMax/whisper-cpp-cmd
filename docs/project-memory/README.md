@@ -17,6 +17,8 @@
 - [开发与部署流程](project-dev-workflow.md)
 - [重启后的验证](restart-verify-process.md)
 
+开发/发布模式边界以 [开发与部署流程](project-dev-workflow.md) 为准：默认只运行 `run_dev.sh`；只有用户明确授权发布时才运行 `ship_app.sh`。
+
 ## 已验证的工程决策
 
 - [剪贴板：NSPasteboard 优先](clipboard-nspasteboard-preference.md)

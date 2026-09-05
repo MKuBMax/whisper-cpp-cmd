@@ -16,6 +16,9 @@
 
 ## 开发与部署工作流
 
-- 改完代码后运行 `bash ship_app.sh`，用 standalone 包替换 `/Applications/WhisperCppCmd.app` 并重启让用户审核；本机打包流程不使用 alias App。
+- **默认处于开发模式。** 修改代码、运行测试、调试和让用户试用时，只使用 `bash run_dev.sh`；不得调用 `ship_app.sh`、`build_app.sh`、`package_app.sh` 或替换 `/Applications/WhisperCppCmd.app`。
+- **只有用户明确表示“准备发布/发布/安装正式版”时，才进入发布模式。** 发布模式才允许运行 `bash ship_app.sh`，用 standalone 包替换 `/Applications/WhisperCppCmd.app` 并重启。
+- 用户说“继续开发”“试一下”“验证样式/功能”均属于开发模式，不等同于发布授权。
 - **重启后必须等待 10-15 秒**，再检查进程是否存活：`ps aux | grep "WhisperCppCmd.app/Contents/MacOS"`，并确认日志尾部出现「应用已启动，进入事件循环」。app 启动要加载模型、建 pipeline，过早检查会误判「重启成功」。
-- **每次含代码改动的 git 提交/合并都必须 `bash ship_app.sh`**（调用 `build_app.sh`/`package_app.sh` 构建 standalone 分发包 + 替换 `/Applications/WhisperCppCmd.app` + 重启）。**纯文档/非代码改动**（如本文件、README）的提交无需 ship。同样按上条等待 + 验证进程。
+- 含代码改动的提交也不自动触发发布；只有用户明确授权发布时才 ship。纯文档改动无需 ship。
+- `run_dev.sh` 直接使用 `.venv-arm64/bin/python` 运行源码，不替换正式 App；`ship_app.sh` 是发布动作，不是普通重启或审核动作。

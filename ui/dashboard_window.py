@@ -20,6 +20,7 @@ class DashboardWindowController(NSObject):
     def show(self):
         if self.window is None:
             self._build_window()
+        self.app.refresh_accessibility_permission_status()
         self.refresh()
         self.window.makeKeyAndOrderFront_(None)
         AppKit.NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
@@ -64,15 +65,15 @@ class DashboardWindowController(NSObject):
         self._button("打开模型文件夹", "openModelsFolder:", 30, 284, 145)
         self._reload = self._button("重新加载", "reloadModel:", 182, 284)
         self._label("系统权限", 34, 242, 300, size=15)
-        for key, title, y in (("microphone", "麦克风", 205), ("accessibility", "辅助功能", 166)):
+        for key, title, y in (("microphone", "麦克风", 205), ("accessibility", "辅助功能", 166), ("input_monitoring", "输入监控", 127)):
             self._label(title, 34, y + 5, 150)
             self._permission_status_labels[key] = self._label("检查中", 205, y + 5, 175, secondary=True)
             button = self._button("允许", "openPermission:", 408, y, 118)
             button.setIdentifier_(key)
             self._permission_buttons[key] = button
-        self._label("仅用于录音与快捷键输入，音频和文字不会上传。", 34, 136, 490, secondary=True)
-        self._button("输入偏好…", "showPreferences:", 30, 83, 135)
-        self._button("快捷键未响应？", "inputMonitoring:", 350, 83, 176)
+        self._label("仅用于录音与快捷键输入，音频和文字不会上传。", 34, 99, 490, secondary=True)
+        self._button("输入偏好…", "showPreferences:", 30, 62, 135)
+        self._button("快捷键未响应？", "inputMonitoring:", 350, 62, 176)
         self._button("关闭窗口", "close:", 408, 26, 118).setKeyEquivalent_("\r")
         self._label("随时从菜单栏或 Dock 再次打开", 34, 32, 355, secondary=True)
 
@@ -115,6 +116,8 @@ class DashboardWindowController(NSObject):
             state = "还需要允许下方系统权限"
         elif not self.app._keyboard_listener_is_healthy():
             state = "快捷键尚未就绪，请检查系统权限"
+        elif not permissions.get("input_monitoring"):
+            state = "输入监控未授权，快捷键可能无法响应"
         else:
             state = {"recording": "正在听你说话…", "processing": "正在识别…", "paused": "已暂停，可从菜单栏恢复", "error": "上次录音未完成，请重试"}.get(self.app._state, "已就绪 · 随时按住快捷键开始")
         self._status.setStringValue_(state)
@@ -154,7 +157,7 @@ class DashboardWindowController(NSObject):
 
     def showPreferences_(self, sender):
         menu = self.app.status_bar.preferences_menu
-        menu.popUpMenuPositioningItem_atLocation_inView_(None, AppKit.NSMakePoint(34, 82), self.window.contentView())
+        menu.popUpMenuPositioningItem_atLocation_inView_(None, AppKit.NSMakePoint(34, 62), self.window.contentView())
 
     def close_(self, sender):
         if self.window is None:
