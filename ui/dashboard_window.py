@@ -157,7 +157,14 @@ class DashboardWindowController(NSObject):
         menu.popUpMenuPositioningItem_atLocation_inView_(None, AppKit.NSMakePoint(34, 82), self.window.contentView())
 
     def close_(self, sender):
-        self.window.performClose_(None)
+        if self.window is None:
+            return
+        # ``performClose_`` can be ignored for a non-document utility window
+        # when the app is a menu-bar accessory. Explicitly order it out so the
+        # window never traps the user in onboarding, while the app keeps
+        # running in the menu bar/Dock.
+        self.window.orderOut_(None)
+        self.windowWillClose_(None)
 
     def cancelOperation_(self, sender):
         self.close_(sender)

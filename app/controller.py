@@ -517,6 +517,11 @@ class VoiceInputApp:
     def open_settings(self) -> None:
         self.open_dashboard()
 
+    def close_dashboard(self) -> None:
+        dashboard = getattr(self, "_dashboard_window", None)
+        if dashboard is not None:
+            dashboard.close_(None)
+
     def load_model_async(self, name, force: bool = False):
         name = str(name or "").strip()
         if not name or name not in self.settings.list_available_models():
@@ -2263,10 +2268,9 @@ class VoiceInputApp:
         app_menu = AppKit.NSMenu.alloc().init()
         root_item.setSubmenu_(app_menu)
         main_menu.addItem_(root_item)
-        for title, action, key in (("打开 WhisperCppCmd…", "openDashboard:", ","), ("关闭窗口", "performClose:", "w"), ("退出 WhisperCppCmd", "quitApp:", "q")):
+        for title, action, key in (("打开 WhisperCppCmd…", "openDashboard:", ","), ("关闭窗口", "closeDashboard:", "w"), ("退出 WhisperCppCmd", "quitApp:", "q")):
             menu_item = app_menu.addItemWithTitle_action_keyEquivalent_(title, action, key)
-            if action != "performClose:":
-                menu_item.setTarget_(self.status_bar)
+            menu_item.setTarget_(self.status_bar)
         app.setMainMenu_(main_menu)
         AppHelper.callLater(2.0, self.status_bar.log_screen_position)
 

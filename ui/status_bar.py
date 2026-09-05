@@ -551,6 +551,10 @@ class StatusBarController(NSObject):
         if self.app and hasattr(self.app, "open_dashboard"):
             self.app.open_dashboard()
 
+    def closeDashboard_(self, sender):
+        if self.app and hasattr(self.app, "close_dashboard"):
+            self.app.close_dashboard()
+
     def checkAccessibility_(self, sender):
         self.app.check_accessibility_permission()
 
