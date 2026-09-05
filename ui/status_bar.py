@@ -47,8 +47,11 @@ class StatusBarController(NSObject):
         self.hotkey_submenu = None
         self.accessibility_permission_item = None
         self.input_monitoring_permission_item = None
+        self.dashboard_item = None
         self.auto_paste_item = None
         self.show_in_dock_item = None
+        self.show_floating_pill_item = None
+        self.status_bar_title_item = None
         self.login_at_startup_item = None
         self.vad_item = None
         self.duck_item = None
@@ -99,6 +102,12 @@ class StatusBarController(NSObject):
 
         self.status_menu = AppKit.NSMenu.alloc().init()
         self.status_menu.setDelegate_(self)
+        self.dashboard_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
+            "控制中心…",
+            "openDashboard:",
+            "d",
+        )
+        self.dashboard_item.setTarget_(self)
         self.status_title_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
             "状态：空闲",
             None,
@@ -364,6 +373,27 @@ class StatusBarController(NSObject):
         )
         self.show_in_dock_item.setTarget_(self)
 
+        self.show_floating_pill_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
+            "在桌面显示悬浮胶囊",
+            "toggleFloatingPill:",
+            ""
+        )
+        self.show_floating_pill_item.setTarget_(self)
+
+        self.status_bar_title_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
+            "菜单栏图标显示状态文字",
+            "toggleStatusBarTitle:",
+            ""
+        )
+        self.status_bar_title_item.setTarget_(self)
+
+        reanchor_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
+            "重新挂载菜单栏图标 🔄",
+            "reanchorStatusBar:",
+            ""
+        )
+        reanchor_item.setTarget_(self)
+
         self.stats_item = self.status_menu.addItemWithTitle_action_keyEquivalent_(
             "统计面板…",
             "showStats:",
@@ -490,13 +520,36 @@ class StatusBarController(NSObject):
         button.setToolTip_(f"语音输入运行中 - {state_text}")
 
         image = self.icons.get(state) or self.icons.get("idle")
-        if image is not None:
-            button.setImage_(image)
-            button.setImagePosition_(AppKit.NSImageOnly)
+
+        show_title = True
+        if self.app and hasattr(self.app, "settings"):
+            show_title = getattr(self.app.settings, "status_bar_show_title", True)
+
+        title_suffix_map = {
+            "idle": " 语音",
+            "recording": " 录音中",
+            "processing": " 转写中",
+            "error": " 错误",
+            "paused": " 暂停",
+        }
+        suffix = title_suffix_map.get(state, " 语音")
+
+        if show_title:
+            button.setTitle_(suffix)
+            if image is not None:
+                button.setImage_(image)
+                button.setImagePosition_(AppKit.NSImageLeft)
+            else:
+                button.setTitle_(f"🎙️{suffix}")
+                button.setImagePosition_(AppKit.NSNoImage)
         else:
-            # 容灾兜底：绝不留出 0 宽度空白，使用 Emoji 保证菜单项始终可见可点
-            button.setTitle_("🎙️")
-            button.setImagePosition_(AppKit.NSNoImage)
+            button.setTitle_("")
+            if image is not None:
+                button.setImage_(image)
+                button.setImagePosition_(AppKit.NSImageOnly)
+            else:
+                button.setTitle_("🎙️")
+                button.setImagePosition_(AppKit.NSNoImage)
 
     def setModelName_(self, model_name):
         if self.model_item is not None:
@@ -587,6 +640,18 @@ class StatusBarController(NSObject):
     def setShowInDock_(self, enabled):
         if self.show_in_dock_item is not None:
             self.show_in_dock_item.setState_(
+                AppKit.NSControlStateValueOn if enabled else AppKit.NSControlStateValueOff
+            )
+
+    def setShowFloatingPill_(self, enabled):
+        if self.show_floating_pill_item is not None:
+            self.show_floating_pill_item.setState_(
+                AppKit.NSControlStateValueOn if enabled else AppKit.NSControlStateValueOff
+            )
+
+    def setStatusBarShowTitle_(self, enabled):
+        if self.status_bar_title_item is not None:
+            self.status_bar_title_item.setState_(
                 AppKit.NSControlStateValueOn if enabled else AppKit.NSControlStateValueOff
             )
 
@@ -792,6 +857,24 @@ class StatusBarController(NSObject):
     def toggleShowInDock_(self, sender):
         self.app.toggle_show_in_dock()
 
+    def openDashboard_(self, sender):
+        if self.app and hasattr(self.app, "open_dashboard"):
+            self.app.open_dashboard()
+
+    def toggleFloatingPill_(self, sender):
+        if self.app and hasattr(self.app, "toggle_floating_pill"):
+            self.app.toggle_floating_pill()
+
+    def toggleStatusBarTitle_(self, sender):
+        if self.app and hasattr(self.app, "toggle_status_bar_title"):
+            self.app.toggle_status_bar_title()
+
+    def reanchorStatusBar_(self, sender):
+        if self.app and hasattr(self.app, "reanchor_status_bar"):
+            self.app.reanchor_status_bar()
+        else:
+            self.reanchor()
+
     def checkAccessibility_(self, sender):
         self.app.check_accessibility_permission()
 
@@ -861,3 +944,16 @@ class StatusBarController(NSObject):
 
     def quitApp_(self, sender):
         self.app.shutdown()
+
+    @objc.python_method
+    def reanchor(self):
+        """重新向系统申请并挂载状态栏项。"""
+        if self.status_item is not None:
+            try:
+                AppKit.NSStatusBar.systemStatusBar().removeStatusItem_(self.status_item)
+            except Exception:
+                pass
+            self.status_item = None
+        self._setup_status_item()
+        if self.app is not None and hasattr(self.app, "_refresh_status_bar_details"):
+            self.app._refresh_status_bar_details()

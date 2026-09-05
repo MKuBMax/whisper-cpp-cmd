@@ -28,7 +28,7 @@ class SettingsWindowController(NSObject):
 
     @objc.python_method
     def _build_window(self):
-        width, height = 520, 300
+        width, height = 540, 370
         self.window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             AppKit.NSMakeRect(0, 0, width, height),
             AppKit.NSWindowStyleMaskTitled
@@ -55,21 +55,34 @@ class SettingsWindowController(NSObject):
             secondary=True,
         )
 
-        self._label(content, "界面与入口", 34, height - 125, 300, 24, 16)
+        self._label(content, "界面与入口（刘海屏防护）", 34, height - 122, 300, 24, 16)
         self._checkbox(
             content,
             "show_in_dock",
             "在 Dock 栏显示应用图标（推荐：防刘海屏/菜单栏隐藏工具折叠丢失）",
-            height - 159,
+            height - 154,
+        )
+        self._checkbox(
+            content,
+            "show_floating_pill",
+            "在桌面显示交互悬浮胶囊（支持点击录音、右键菜单、自由拖拽）",
+            height - 182,
+        )
+        self._checkbox(
+            content,
+            "status_bar_show_title",
+            "菜单栏图标显示状态文字（如“🎙️ 语音”，撑开宽度防刘海挤压）",
+            height - 210,
         )
         self._checkbox(
             content,
             "update_check_enabled",
             "每天自动检查 GitHub 更新（仅提示，不自动安装）",
-            height - 189,
+            height - 238,
         )
-        self._button(content, "models", "打开模型目录", 34, 70, 150, 30, "openModelsFolder:")
-        self._button(content, "stats", "打开统计面板", 200, 70, 150, 30, "showStats:")
+        self._button(content, "dashboard", "打开控制中心…", 34, 70, 130, 30, "openDashboard:")
+        self._button(content, "models", "打开模型目录", 170, 70, 130, 30, "openModelsFolder:")
+        self._button(content, "stats", "打开统计面板", 306, 70, 130, 30, "showStats:")
         self._status_label = self._label(content, "", 34, 42, 300, 20, 12, secondary=True)
         self._button(content, "save", "保存", width - 190, 24, 78, 32, "save:")
         self._button(content, "close", "关闭", width - 100, 24, 72, 32, "close:")
@@ -118,6 +131,20 @@ class SettingsWindowController(NSObject):
                 if getattr(settings, "show_in_dock", True)
                 else AppKit.NSControlStateValueOff
             )
+        pill_control = self._controls.get("show_floating_pill")
+        if pill_control is not None:
+            pill_control.setState_(
+                AppKit.NSControlStateValueOn
+                if getattr(settings, "show_floating_pill", True)
+                else AppKit.NSControlStateValueOff
+            )
+        title_control = self._controls.get("status_bar_show_title")
+        if title_control is not None:
+            title_control.setState_(
+                AppKit.NSControlStateValueOn
+                if getattr(settings, "status_bar_show_title", True)
+                else AppKit.NSControlStateValueOff
+            )
         update_control = self._controls.get("update_check_enabled")
         if update_control is not None:
             update_control.setState_(
@@ -130,11 +157,14 @@ class SettingsWindowController(NSObject):
     @objc.python_method
     def _values(self):
         vals = {}
-        if "show_in_dock" in self._controls:
-            vals["show_in_dock"] = bool(self._controls["show_in_dock"].state())
-        if "update_check_enabled" in self._controls:
-            vals["update_check_enabled"] = bool(self._controls["update_check_enabled"].state())
+        for key in ("show_in_dock", "show_floating_pill", "status_bar_show_title", "update_check_enabled"):
+            if key in self._controls:
+                vals[key] = bool(self._controls[key].state())
         return vals
+
+    def openDashboard_(self, sender):
+        if self.app and hasattr(self.app, "open_dashboard"):
+            self.app.open_dashboard()
 
     def checkboxChanged_(self, sender):
         # 先更新控件状态，点击“保存”时统一写入，避免每个勾选都重建运行时对象。

@@ -123,6 +123,8 @@ class Settings:
     history_max_entries: int = 100
     onboarding_completed: bool = False
     show_in_dock: bool = True  # 同时在 Dock 栏显示图标（防刘海屏/菜单栏隐藏工具折叠丢失）
+    show_floating_pill: bool = True  # 在桌面常驻显示交互悬浮胶囊（防刘海遮挡，支持点击录音、右键菜单、拖拽）
+    status_bar_show_title: bool = True  # 状态栏图标附带状态文字（撑开宽度防刘海挤压）
     
     # 日志配置
     verbose: bool = True
@@ -178,6 +180,8 @@ class Settings:
             ("verbose", True),
             ("use_vad", False),
             ("show_in_dock", True),
+            ("show_floating_pill", True),
+            ("status_bar_show_title", True),
         ):
             setattr(self, name, _coerce_bool(getattr(self, name, default), default))
 

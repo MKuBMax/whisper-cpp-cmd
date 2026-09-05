@@ -120,11 +120,17 @@ def test_save_creates_private_parent_and_uses_atomic_temp_files(tmp_path):
 def test_show_in_dock_setting_default_and_roundtrip(tmp_path):
     s = Settings()
     assert s.show_in_dock is True
+    assert s.show_floating_pill is True
+    assert s.status_bar_show_title is True
 
     path = tmp_path / "dock_config.json"
     s.show_in_dock = False
+    s.show_floating_pill = False
+    s.status_bar_show_title = False
     s.save(str(path))
 
     loaded = Settings.load(str(path))
     assert loaded.show_in_dock is False
+    assert loaded.show_floating_pill is False
+    assert loaded.status_bar_show_title is False
 

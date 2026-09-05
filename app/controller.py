@@ -150,6 +150,8 @@ from core import login_item
 from ui.status_bar import StatusBarController
 from ui.overlay_window import RecordingOverlay
 from ui.settings_window import SettingsWindowController
+from ui.dashboard_window import DashboardWindowController
+from ui.floating_pill import FloatingPillController
 from ui.stats_window import StatsWindowController
 from ui.onboarding_window import OnboardingWindowController
 from app import diagnostics
@@ -252,13 +254,13 @@ class _AppDelegate(NSObject):
         return None
 
     def applicationShouldHandleReopen_hasVisibleWindows_(self, sender, flag):
-        """用户点击 Dock 图标时，唤起偏好设置或向导窗口。"""
+        """用户点击 Dock 图标时，唤起控制中心或向导窗口。"""
         app = getattr(self, "_app_ref", None)
         if app is not None:
             if not getattr(app.settings, "onboarding_completed", False):
                 app.open_onboarding()
             else:
-                app.open_settings()
+                app.open_dashboard()
         return True
 
 
@@ -312,7 +314,9 @@ class VoiceInputApp:
         self._input_monitoring_trusted: bool | None = None
         self._permission_repair_alert_key = None
         self._overlay: RecordingOverlay | None = None
+        self._floating_pill: FloatingPillController | None = None
         self._settings_window: SettingsWindowController | None = None
+        self._dashboard_window: DashboardWindowController | None = None
         self._stats_window: StatsWindowController | None = None
         self._onboarding_window: OnboardingWindowController | None = None
         self._update_thread: threading.Thread | None = None
@@ -354,6 +358,15 @@ class VoiceInputApp:
         except Exception:
             self._logger.exception("录音浮窗构建失败，将禁用")
             self._overlay = None
+
+        try:
+            self._floating_pill = FloatingPillController.alloc().initWithApp_(self)
+            if getattr(self.settings, "show_floating_pill", True):
+                self._floating_pill.show()
+        except Exception:
+            self._logger.exception("桌面悬浮胶囊构建失败")
+            self._floating_pill = None
+
         self._refresh_status_bar_details()
         self._refresh_status_bar_dynamic_details()
         threading.Thread(
@@ -508,6 +521,11 @@ class VoiceInputApp:
         self._live_dictation.trace = None
         return self.pipeline.initialize()
 
+    def open_dashboard(self) -> None:
+        if self._dashboard_window is None:
+            self._dashboard_window = DashboardWindowController.alloc().initWithApp_(self)
+        self._dashboard_window.show()
+
     def open_settings(self) -> None:
         if self._settings_window is None:
             self._settings_window = SettingsWindowController.alloc().initWithApp_(self)
@@ -526,6 +544,17 @@ class VoiceInputApp:
                     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
                 else:
                     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+        if "show_floating_pill" in values:
+            new_pill = bool(values["show_floating_pill"])
+            if new_pill != getattr(self.settings, "show_floating_pill", True):
+                self.settings.show_floating_pill = new_pill
+                if self._floating_pill is not None:
+                    self._floating_pill.set_visible(self.settings.show_floating_pill)
+        if "status_bar_show_title" in values:
+            new_title = bool(values["status_bar_show_title"])
+            if new_title != getattr(self.settings, "status_bar_show_title", True):
+                self.settings.status_bar_show_title = new_title
+                self._set_state(self._state)
         self.settings.__post_init__()
         self.settings.save()
         self._refresh_status_bar_details()
@@ -920,6 +949,10 @@ class VoiceInputApp:
         AppHelper.callAfter(self.status_bar.setLoginAtStartup_, login_item.is_enabled())
         if hasattr(self.status_bar, "setShowInDock_"):
             AppHelper.callAfter(self.status_bar.setShowInDock_, getattr(self.settings, "show_in_dock", True))
+        if hasattr(self.status_bar, "setShowFloatingPill_"):
+            AppHelper.callAfter(self.status_bar.setShowFloatingPill_, getattr(self.settings, "show_floating_pill", True))
+        if hasattr(self.status_bar, "setStatusBarShowTitle_"):
+            AppHelper.callAfter(self.status_bar.setStatusBarShowTitle_, getattr(self.settings, "status_bar_show_title", True))
         AppHelper.callAfter(self.status_bar.setVad_, self.settings.use_vad)
         AppHelper.callAfter(self.status_bar.setOverlay_, self.settings.show_overlay)
         AppHelper.callAfter(self.status_bar.setOverlayFollowMouse_, self.settings.overlay_follow_mouse)
@@ -1536,14 +1569,41 @@ class VoiceInputApp:
             return 0.0
 
     def _show_overlay(self):
+        if self._floating_pill is not None:
+            AppHelper.callAfter(self._floating_pill.on_recording_started)
         if self._overlay is None or not self.settings.show_overlay:
             return
         AppHelper.callAfter(self._overlay.show)
 
     def _hide_overlay(self):
+        if self._floating_pill is not None:
+            AppHelper.callAfter(self._floating_pill.on_recording_stopped)
         if self._overlay is None:
             return
         AppHelper.callAfter(self._overlay.hide)
+
+    def toggle_floating_pill(self):
+        self.settings.show_floating_pill = not getattr(self.settings, "show_floating_pill", True)
+        self.settings.save()
+        if self._floating_pill is not None:
+            AppHelper.callAfter(self._floating_pill.set_visible, self.settings.show_floating_pill)
+        self._refresh_status_bar_details()
+        self._logger.info("桌面悬浮胶囊切换：%s", self.settings.show_floating_pill)
+        print(f"💊 桌面悬浮胶囊已{'开启' if self.settings.show_floating_pill else '关闭'}")
+
+    def toggle_status_bar_title(self):
+        self.settings.status_bar_show_title = not getattr(self.settings, "status_bar_show_title", True)
+        self.settings.save()
+        self._set_state(self._state)
+        self._refresh_status_bar_details()
+        self._logger.info("状态栏文字显示切换：%s", self.settings.status_bar_show_title)
+        print(f"🏷️ 状态栏文字显示已{'开启' if self.settings.status_bar_show_title else '关闭'}")
+
+    def reanchor_status_bar(self):
+        if self.status_bar is not None:
+            AppHelper.callAfter(self.status_bar.reanchor)
+            self._logger.info("重新挂载状态栏图标")
+            print("🔄 状态栏图标已重新向系统挂载")
 
     def toggle_overlay(self):
         self.settings.show_overlay = not self.settings.show_overlay
@@ -1599,10 +1659,10 @@ class VoiceInputApp:
             return False
         return self.copy_text(self._last_result)
 
-    def get_recent_history(self):
+    def get_recent_history(self, count: int = 20):
         if self.pipeline is None:
             return []
-        history = self.pipeline.output_handler.get_history(20)
+        history = self.pipeline.output_handler.get_history(count)
         return list(reversed(history))
 
     def release_backend_resources(self, manual: bool):
@@ -1636,7 +1696,7 @@ class VoiceInputApp:
         return False
 
     def set_auto_release_minutes(self, minutes: int):
-        self.settings.auto_release_minutes = max(0, int(minutes))
+        self.settings.auto_release_minutes = max(0, min(1440, minutes))
         self.settings.save()
         self._refresh_status_bar_details()
         self._schedule_idle_release_timer()
@@ -1659,6 +1719,8 @@ class VoiceInputApp:
             if self._rebuild_pipeline():
                 self._last_result = f"已切换模型：{model_name}"
                 print(f"🧠 已切换模型：{model_name}")
+                if self._floating_pill is not None:
+                    AppHelper.callAfter(self._floating_pill.update_state)
         finally:
             self._pipeline_transitioning = False
 
@@ -1933,6 +1995,8 @@ class VoiceInputApp:
                     print(f"⏱️  录音：{result.recording_duration:.2f}秒 → ✅ {result.processing_time:.2f}秒 (RTF: {result.rtf:.2f}x)")
                     print(f"   「{result.text}」")
                     self._last_result = result.text
+                if self._floating_pill is not None:
+                    AppHelper.callAfter(self._floating_pill.on_transcription_completed, self._last_result)
                 if overflow:
                     print(f"   ⚠️ 已达最大录音时长 {self.settings.max_recording_seconds:.0f}s，超出部分已截断")
                     self._logger.warning(

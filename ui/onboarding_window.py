@@ -258,18 +258,22 @@ class OnboardingWindowController(NSObject):
             self.app.request_permission(str(sender.representedObject()))
 
     def skipOnboarding_(self, sender):
-        """稍后设置，优雅关闭窗口并标记已阅读。"""
+        """稍后设置，优雅关闭窗口并标记已阅读，自动打开控制中心。"""
         if self.app and hasattr(self.app, "settings"):
             self.app.settings.onboarding_completed = True
             self.app.settings.save()
         if self.window is not None:
             self.window.orderOut_(None)
+        if self.app and hasattr(self.app, "open_dashboard"):
+            self.app.open_dashboard()
 
     def finish_(self, sender):
-        """点击完成或开始使用。"""
+        """点击完成或开始使用，自动打开控制中心。"""
         self.refresh_permissions()
         if self.app and hasattr(self.app, "settings"):
             self.app.settings.onboarding_completed = True
             self.app.settings.save()
         if self.window is not None:
             self.window.orderOut_(None)
+        if self.app and hasattr(self.app, "open_dashboard"):
+            self.app.open_dashboard()
