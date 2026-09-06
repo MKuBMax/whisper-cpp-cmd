@@ -30,14 +30,28 @@ def estimate_lag_samples(mic: np.ndarray, ref: np.ndarray, sr: int,
                          max_lag_ms: int = MAX_LAG_MS) -> int:
     """互相关估计麦克风相对参考的滞后采样数。正值表示麦克风滞后，需把参考右移对齐。
 
-    只用前 ESTIMATE_SECONDS 音频估计：时延是系统固定值，全量参与只增加 O(n) 成本。
+    用参考能量最高的 ESTIMATE_SECONDS 窗口估计：时延是系统固定值，全量参与只增加
+    O(n) 成本；前段静音时前 2 秒估计会锁偏，故选最响窗口。
     """
     m = np.asarray(mic, dtype=np.float64).ravel()
     r = np.asarray(ref, dtype=np.float64).ravel()
-    cap = int(sr * ESTIMATE_SECONDS)
-    m = m[:cap]
-    r = r[:cap]
     n = min(m.size, r.size)
+    if n < int(sr * 0.05):
+        return 0
+    win = int(sr * ESTIMATE_SECONDS)
+    if n > win:
+        ref_f = r[:n].astype(np.float32)
+        frame = max(1, int(sr * FRAME_MS / 1000))
+        best_start, best_energy = 0, -1.0
+        for start in range(0, n - win + 1, frame):
+            seg = ref_f[start: start + win].astype(np.float64)
+            energy = float(np.dot(seg, seg))
+            if energy > best_energy:
+                best_energy = energy
+                best_start = start
+        m = m[best_start: best_start + win]
+        r = r[best_start: best_start + win]
+        n = min(m.size, r.size)
     if n < int(sr * 0.05):
         return 0
     m = m[:n] - m[:n].mean()

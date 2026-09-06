@@ -23,6 +23,18 @@ def test_align_finds_delay():
     assert abs(lag - delay) <= 8
 
 
+def test_estimate_uses_loudest_window():
+    sr = 16_000
+    delay = 160
+    rng = np.random.default_rng(7)
+    quiet = np.zeros(sr * 3, dtype=np.float32)
+    loud = (rng.standard_normal(sr * 4).astype(np.float32)) * 0.3
+    ref = np.concatenate([quiet, loud])
+    mic = np.concatenate([np.zeros(delay, dtype=np.float32), ref])[: len(ref)]
+    lag = estimate_lag_samples(mic, ref, sr, max_lag_ms=200)
+    assert abs(lag - delay) <= 8
+
+
 def test_gate_suppresses_music_only():
     sr = 16_000
     music = _sine(440.0, sr, sr, amp=0.3)
