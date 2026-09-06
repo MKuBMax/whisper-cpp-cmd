@@ -39,6 +39,8 @@ class PipelineConfig:
     use_vad: bool = False
     vad_model: str = ''
     transcription_prompt: str = ''
+    ref_cancel: bool = False
+    ref_audio: Optional[object] = None
     
     def __post_init__(self):
         if self.audio is None:
@@ -269,6 +271,18 @@ class Pipeline:
             logger.info("预处理完成：elapsed=%.2fs", time.time() - process_start)
             if isinstance(trace, DictationTrace):
                 logger.info("%s pre_process done elapsed=%.2fs", trace.prefix("pre_process"), time.time() - process_start)
+            if self.config.ref_cancel and self.config.ref_audio is not None:
+                try:
+                    from .ref_cancel import suppress_with_ref
+                    ref = self.config.ref_audio
+                    cleaned, stats = suppress_with_ref(processed_audio, ref, self.config.audio.sample_rate)
+                    logger.info(
+                        "参考消除：lag=%s suppressed=%.2f",
+                        stats.get("lag"), stats.get("suppressed_ratio"),
+                    )
+                    processed_audio = cleaned
+                except Exception:
+                    logger.warning("参考消除失败，回退原声", exc_info=True)
             
             if getattr(self, "before_transcribe", None) is not None:
                 self.before_transcribe()

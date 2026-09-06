@@ -98,6 +98,9 @@ class Settings:
     max_recording_seconds: float = 300.0  # 单次录音最大时长，超出截断防止内存无限增长
     hotkey: str = "cmd_r"  # 录音触发键（cmd_r/cmd_l/alt_r/shift_r/ctrl_r/f13/f14）
 
+    # 系统音频参考消除：录音时经 ScreenCaptureKit 抓系统输出做参考，压制扬声器串音
+    ref_cancel: bool = False  # 默认关闭；开启后首次使用会弹屏幕录制权限
+
     # 媒体 ducking：录音期间压低系统输出音量，降低扬声器音乐串入麦克风（用耳机时自动跳过）
     duck_media: bool = True
     duck_volume: int = 10  # ducking 目标音量 0-100；越低压制越彻底=转写越好但音乐越听不清
@@ -172,6 +175,7 @@ class Settings:
             self.dictation_mode = "quick"
 
         for name, default in (
+            ("ref_cancel", False),
             ("duck_media", True),
             ("duck_when_headphones", False),
             ("auto_paste", True),

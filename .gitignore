@@ -3,6 +3,8 @@ history.json
 __pycache__/
 *.wav
 .DS_Store
+# sysref_capture 是本地构建的 Swift 二进制，不入库，构建见 core/SYSREF_BUILD.md
+core/sysref_capture
 models/*.bin
 !models/ggml-silero-v6.2.0.bin
 WhisperCppCmd.app/

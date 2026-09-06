@@ -276,6 +276,7 @@ class VoiceInputApp:
         self._media_ducker = MediaDucker(
             self.settings.duck_media, self.settings.duck_volume,
             self.settings.duck_when_headphones)
+        self._sysref = None
         self.pipeline: Pipeline = None
         self.listener: keyboard.Listener | None = None
         self.status_bar: StatusBarController | None = None
@@ -492,6 +493,7 @@ class VoiceInputApp:
         pipeline_config.transcription_timeout = self.settings.transcription_timeout
         pipeline_config.use_vad = self.settings.use_vad
         pipeline_config.vad_model = self.settings.vad_model
+        pipeline_config.ref_cancel = self.settings.ref_cancel
 
         self.pipeline = Pipeline(pipeline_config)
         self._live_dictation = None
@@ -1007,6 +1009,8 @@ class VoiceInputApp:
         AppHelper.callAfter(self.status_bar.setOverlayFollowMouse_, self.settings.overlay_follow_mouse)
         AppHelper.callAfter(self.status_bar.setDuckMedia_, self.settings.duck_media)
         AppHelper.callAfter(self.status_bar.setDuckHeadphones_, self.settings.duck_when_headphones)
+        if hasattr(self.status_bar, "setRefCancel_"):
+            AppHelper.callAfter(self.status_bar.setRefCancel_, self.settings.ref_cancel)
         AppHelper.callAfter(self.status_bar.setChineseScriptOptions_, self._get_chinese_script_options())
         AppHelper.callAfter(self.status_bar.setDictationModeOptions_, self._get_dictation_mode_options())
 
@@ -1650,6 +1654,18 @@ class VoiceInputApp:
         self._logger.info("浮窗跟随鼠标切换：%s", self.settings.overlay_follow_mouse)
         print(f"🖱️ 浮窗跟随鼠标已{'开启' if self.settings.overlay_follow_mouse else '关闭'}")
 
+    def toggle_ref_cancel(self):
+        if self.pipeline is not None and self.pipeline.is_recording:
+            print("❌ 录音中无法切换系统音频参考消除")
+            return
+        self.settings.ref_cancel = not self.settings.ref_cancel
+        self.settings.save()
+        if self.pipeline is not None:
+            self.pipeline.config.ref_cancel = self.settings.ref_cancel
+        self._refresh_status_bar_details()
+        self._logger.info("系统音频参考消除切换：%s", self.settings.ref_cancel)
+        print(f"🔇 系统音频参考消除已{'开启' if self.settings.ref_cancel else '关闭'}")
+
     def toggle_duck_media(self):
         self.settings.duck_media = not self.settings.duck_media
         self.settings.save()
@@ -1670,6 +1686,52 @@ class VoiceInputApp:
         self._refresh_status_bar_details()
         self._logger.info("戴耳机时也压低切换：%s", self.settings.duck_when_headphones)
         print(f"🎧 戴耳机时也压低已{'开启' if self.settings.duck_when_headphones else '关闭'}")
+
+    def _start_sysref(self):
+        """录音开始时后台启动系统参考采集。失败静默，调用方回退 raw 链路。
+
+        不阻塞按键到录音：同步 start 要等 ready（权限弹窗时可达 8s），
+        故扔后台线程，主流程继续。参考没 ready 时 stop 返回 None 即回退。"""
+        self._sysref = None
+        if not self.settings.ref_cancel:
+            return
+        try:
+            from core.sysref import SysRefCapture
+            cap = SysRefCapture()
+            self._sysref = cap
+            thread = threading.Thread(
+                target=self._start_sysref_async, args=(cap,), name="SysRefStart", daemon=True
+            )
+            thread.start()
+        except Exception:
+            self._logger.warning("系统参考采集启动失败，回退原声", exc_info=True)
+            self._sysref = None
+
+    def _start_sysref_async(self, cap):
+        try:
+            if not cap.start():
+                if self._sysref is cap:
+                    self._sysref = None
+        except Exception:
+            self._logger.warning("系统参考采集后台启动失败，回退原声", exc_info=True)
+            if self._sysref is cap:
+                self._sysref = None
+
+    def _stop_sysref_into_pipeline(self):
+        """录音结束时收参考 PCM 进 pipeline。失败则 ref_audio 为 None。"""
+        cap, self._sysref = self._sysref, None
+        if self.pipeline is not None:
+            self.pipeline.config.ref_audio = None
+        if cap is None:
+            return
+        try:
+            ref = cap.stop()
+        except Exception:
+            self._logger.warning("系统参考采集停止失败，回退原声", exc_info=True)
+            return
+        if ref is not None and self.pipeline is not None:
+            self.pipeline.config.ref_audio = ref
+            self._logger.info("系统参考音频就绪：samples=%s", len(ref))
 
     def copy_text(self, text: str):
         if not text or self.pipeline is None:
@@ -1905,6 +1967,7 @@ class VoiceInputApp:
         if not self.pipeline.is_recording:
             if self.pipeline.start_recording():
                 self._media_ducker.begin()  # ducking：尽早压低系统音量，减少扬声器音乐串扰
+                self._start_sysref()
                 self._backend_released = False
                 self._set_state("recording")
                 self._refresh_status_bar_details()
@@ -1958,6 +2021,7 @@ class VoiceInputApp:
             self._logger.info("%s 开始 stop_recording", trace.prefix("stop_recording") if trace else "[stop_recording]")
 
             try:
+                self._stop_sysref_into_pipeline()
                 # Live preview was removed from the default product flow. Keep
                 # legacy preview configs safe by delivering the final result
                 # once on release instead of silently dropping the text.

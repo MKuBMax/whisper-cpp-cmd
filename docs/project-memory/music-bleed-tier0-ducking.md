@@ -27,5 +27,13 @@ begin 和 restore 已异步化，并把多次 osascript 合并为单次脚本，
 
 ## Tier 1 选项
 
-如果 Tier 0 不够，唯一有希望真正抹除音乐的是 VPIO/AEC。但应使用签名 Swift 子进程持有 AudioUnit 并通过 stdout 输出 int16 PCM，不能在主 Python 进程里直接持有；这与当前采集 worker 隔离架构一致。
+已落地为系统音频参考消除（ref_cancel，默认关闭）：录音时经 ScreenCaptureKit 抓系统输出做参考，对齐后块级门控压制扬声器串音。
+
+- 采集：Swift 子进程 core/sysref_capture 经 SCStream 只抓音频，输出 16kHz 单声道 PCM，构建见 core/SYSREF_BUILD.md。
+- 消除：core/ref_cancel.py 纯函数，互相关粗对齐加逐块能量门，不引入重依赖。
+- 接入：按键开始后台启动参考采集，结束时收 PCM 进 pipeline，转写前消除，失败回退原声。
+- 开关：菜单栏输入偏好系统音频参考消除一项，配置 ref_cancel 持久化。
+- 实测：播放音乐按住不说话判 no_speech，suppressed 0.7 以上；说话段正常转写，RTF 约 0.1。
+
+旧 Tier 1 设想的 VPIO/AEC 未采用：本机播放的是第三方音乐，不是自身引擎播放，voice processing unit 消除不了外部音乐。
 

@@ -19,6 +19,11 @@ RESOURCES = [
     os.path.join(PROJECT_DIR, "VERSION"),
 ]
 
+# sysref_capture 二进制在构建时若存在则随包发布；源码开发模式直接用 core/ 下的产物。
+_SYSREF_BIN = os.path.join(PROJECT_DIR, "core", "sysref_capture")
+if os.path.isfile(_SYSREF_BIN):
+    RESOURCES.append(_SYSREF_BIN)
+
 OPTIONS = {
     "argv_emulation": False,
     "iconfile": ICON_PATH if os.path.exists(ICON_PATH) else None,
