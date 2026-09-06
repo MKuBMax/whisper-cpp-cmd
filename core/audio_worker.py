@@ -44,6 +44,11 @@ _HEADER = struct.Struct("<BI")   # 1 字节 tag + 4 字节小端 unsigned int �
 # open（Pa_OpenStream）等待超时：虚拟/远程设备或 CoreAudio 异常时 open 可能挂死。
 _OPEN_TIMEOUT = 5.0
 
+# 停录后延迟 abort，给尾音留出到达回调的时间。stop() 把 _is_recording 置 False 后，
+# 回调不再计数推送，但流继续跑 TAIL_MS，期间到达的 PCM 仍进 pipe；到期后 abort。
+# 150ms 约 9 个 block（16kHz/256），覆盖一次按键抖动加一次回调调度延迟。
+_TAIL_MS = 150.0
+
 # 设备列表缓存 TTL：热插拔后最多延迟此秒数重新枚举
 _DEVICE_CACHE_TTL_SECONDS = 60.0
 
@@ -70,6 +75,7 @@ class _AudioCore:
         self.config = config
         self._stream: Optional[sd.InputStream] = None
         self._is_recording: bool = False
+        self._tail_open: bool = False  # 停录尾音窗口：True 时回调继续推送进 pipe
         self._recorded_samples: int = 0
         self._max_samples: int = 0
         self._overflow: bool = False
@@ -278,6 +284,7 @@ class _AudioCore:
             self._overflow = False
             self._max_samples = int(self.config.max_recording_seconds * self.config.sample_rate)
         self._is_recording = True
+        self._tail_open = False
         with self._stream_lock:
             if self._stream is not None and not self._stream.closed and not self._stream.active:
                 try:
@@ -296,10 +303,29 @@ class _AudioCore:
             return self._stream is not None and self._stream.active
 
     def stop_recording(self) -> bool:
-        """停止录音：abort 流 IO（Pa_AbortStream，带超时/abandon 兜底）。不返回数据。"""
+        """停止录音：延迟 abort 流 IO（Pa_AbortStream，带超时/abandon 兜底）。不返回数据。
+
+        先翻 _is_recording 停止计数推送，流继续跑 _TAIL_MS 收尾音，到期后 abort。
+        abort 仍走 AudioService 串行线程，超时语义不变。"""
         self._is_recording = False
+        self._tail_open = True
         logger.info("停止录音收集，音频流将在 %.1fs 空闲后释放", self.config.idle_release_seconds)
         with self._stream_lock:
+            if self._stream is not None and self._stream.active:
+                stream = self._stream
+                self._submit_async(lambda: self._delayed_abort(stream))
+        self._schedule_idle_release()
+        return True
+
+    def _delayed_abort(self, stream: "sd.InputStream") -> None:
+        """停录尾音窗口到期后 abort。跑在 AudioService 串行线程，与 open/close 互斥。"""
+        time.sleep(_TAIL_MS / 1000.0)
+        with self._stream_lock:
+            self._tail_open = False
+            if stream is not self._stream:
+                return  # 期间已重建或释放，旧流由原路径处理
+            if self._is_recording:
+                return  # 期间又按下开始录音，不 abort
             if self._stream is not None and self._stream.active:
                 stream = self._stream
                 if self._run_stream_op_with_timeout("abort", lambda: stream.abort(), timeout=3.0):
@@ -309,8 +335,6 @@ class _AudioCore:
                     self._stream = None
                     self._abandon_stream_async(stream, "录音停止超时")
                     logger.warning("音频流停止超时，放弃该流对象（后台清理），下次录音将重建")
-        self._schedule_idle_release()
-        return True
 
     def stop(self) -> None:
         self._cancel_idle_release()
@@ -408,7 +432,10 @@ class _AudioCore:
     def _on_callback(self, indata, frames, time_info, status):
         if status:
             logger.debug("音频流状态：%s", status)
-        if not self._is_recording:
+        # 停录尾音窗口：_is_recording 已翻 False 但流还没 abort，期间到达的 PCM
+        # 继续推送进 pipe，主进程 stop_recording 的 drain 会收走。窗口由 worker 侧
+        # _TAIL_MS 定时 abort 关闭，天然有界，不会无限推送。
+        if not self._is_recording and not self._tail_open:
             return
         chunk = indata.copy().flatten()
         with self._rec_lock:

@@ -114,10 +114,11 @@ def test_stop_recording_abandons_stream_on_stop_timeout(monkeypatch):
         return real_abandon(s, reason)
 
     monkeypatch.setattr(core, "_abandon_stream_async", spy_abandon)
+    monkeypatch.setattr("core.audio_worker._TAIL_MS", 0.0)
 
     core.stop_recording()
 
-    assert core._stream is None  # 死流已解除引用
+    assert _wait_for(lambda: core._stream is None)  # 死流已解除引用
     assert abandoned == ["录音停止超时"]
     assert _wait_for(lambda: stream.close_called)  # 后台清理确实执行
 
@@ -158,7 +159,9 @@ def test_close_stream_abandons_on_close_timeout(monkeypatch):
 # ---------------- P1：正常停止用 abort 而非 stop ----------------
 
 def test_stop_recording_uses_abort_not_stop():
-    """正常停止录音调 abort（不等设备确认），避开 BlockWhileAudioUnitIsRunning 卡死。"""
+    """正常停止录音调 abort（不等设备确认），避开 BlockWhileAudioUnitIsRunning 卡死。
+
+    abort 经尾音窗口延迟执行：断言等待窗口到期后的最终状态。"""
     core = _AudioCore(AudioConfig())
     stream = _FakeStream(active=True)
     core._stream = stream
@@ -166,7 +169,7 @@ def test_stop_recording_uses_abort_not_stop():
 
     core.stop_recording()
 
-    assert stream.abort_called
+    assert _wait_for(lambda: stream.abort_called)
     assert not stream.stop_called
 
 

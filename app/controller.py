@@ -881,6 +881,13 @@ class VoiceInputApp:
             return False
         self._backend_released = False
         self._model_setup_required = False
+        # 开头预热：pipeline 建好后立即 open 音频流，流保持 active 空转。
+        # 回调在非录音态直接丢弃，开销约一个 block（16ms）；按下时 start_recording
+        # 只翻 _is_recording 开关，首帧零延迟，解决一按就说丢开头词。
+        try:
+            self.pipeline.audio_source.start(self.settings.audio_device_name)
+        except Exception:
+            self._logger.warning("音频流预热失败，按下时重建", exc_info=True)
         self._set_state("paused" if self._paused else "idle")
         self._refresh_status_bar_details()
         self._refresh_status_bar_dynamic_details()
