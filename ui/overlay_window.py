@@ -943,9 +943,9 @@ class RecordingOverlay(NSObject):
         wave = _WaveformView.alloc().init()
         wave.setFrame_(NSMakeRect(_WIDTH - 14 - _WAVE_WIDTH, 8, _WAVE_WIDTH, _HEIGHT - 16))
 
-        # 状态文字（与时长 label 同位置互斥显示：录音态显示时长，状态态显示提示语）
+        # 状态文字：与录音态整行内容同宽同中心，红点隐藏后不留空位，视觉居中。
         status_label = AppKit.NSTextField.alloc().initWithFrame_(
-            NSMakeRect(28, (_HEIGHT - 16) / 2.0, _WIDTH - 28 - 10, 16)
+            NSMakeRect(10, (_HEIGHT - 16) / 2.0, _WIDTH - 20, 16)
         )
         status_label.setEditable_(False)
         status_label.setSelectable_(False)
