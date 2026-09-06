@@ -102,3 +102,16 @@ def test_suppress_after_real_delay():
     out_rms = float(np.sqrt(np.mean(out.astype(np.float64) ** 2)))
     assert out_rms < in_rms * 0.5
     assert stats["suppressed_ratio"] > 0.5
+
+
+def test_long_audio_finishes_fast():
+    import time
+    sr = 16_000
+    n = sr * 6
+    rng = np.random.default_rng(0)
+    mic = (rng.standard_normal(n).astype(np.float32)) * 0.2
+    ref = (rng.standard_normal(n).astype(np.float32)) * 0.2
+    start = time.time()
+    out, _stats = suppress_with_ref(mic, ref, sr)
+    assert time.time() - start < 0.5
+    assert len(out) == n

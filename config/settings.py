@@ -101,11 +101,6 @@ class Settings:
     # 系统音频参考消除：录音时经 ScreenCaptureKit 抓系统输出做参考，压制扬声器串音
     ref_cancel: bool = False  # 默认关闭；开启后首次使用会弹屏幕录制权限
 
-    # 媒体 ducking：录音期间压低系统输出音量，降低扬声器音乐串入麦克风（用耳机时自动跳过）
-    duck_media: bool = True
-    duck_volume: int = 10  # ducking 目标音量 0-100；越低压制越彻底=转写越好但音乐越听不清
-    duck_when_headphones: bool = False  # 戴耳机时也压低（默认 False=耳机时跳过，耳机不串扰麦克风）
-
     # 麦克风配置（使用名称避免索引飘移）
     audio_device_name: Optional[str] = None
     
@@ -176,8 +171,6 @@ class Settings:
 
         for name, default in (
             ("ref_cancel", False),
-            ("duck_media", True),
-            ("duck_when_headphones", False),
             ("auto_paste", True),
             ("update_check_enabled", True),
             ("onboarding_completed", False),
@@ -199,7 +192,6 @@ class Settings:
         self.sample_rate = 16_000
         self.n_threads = _coerce_int(self.n_threads, 8, 1, 128)
         self.auto_release_minutes = _coerce_int(self.auto_release_minutes, 10, 0, 24 * 60)
-        self.duck_volume = _coerce_int(self.duck_volume, 10, 0, 100)
         self.history_max_entries = _coerce_int(self.history_max_entries, 100, 1, 100_000)
         self.block_size = _coerce_int(self.block_size, 256, 1, 65_536)
         self.hotkey = self.hotkey.strip() if isinstance(self.hotkey, str) else "cmd_r"

@@ -2,8 +2,6 @@
   "current_model": "large-v3",
   "language": "zh",
   "sample_rate": 16000,
-  "duck_media": true,
-  "duck_volume": 10,
   "whisper_cli_path": "",
   "n_threads": 8,
   "auto_release_minutes": 10,

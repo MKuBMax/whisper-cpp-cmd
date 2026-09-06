@@ -16,37 +16,8 @@ ARM64_PYTHON="${WHISPER_CPP_CMD_PYTHON:-$PROJECT_DIR/.venv-arm64/bin/python}"
 BUILD_DIR="$PROJECT_DIR/.py2app-build-dev"
 DIST_DIR="$PROJECT_DIR/.py2app-dist-dev"
 
-stop_match() {
-  local match="$1"
-  local pids=""
-  pids="$(pgrep -f "$match" 2>/dev/null || true)"
-  if [ -z "$pids" ]; then
-    return 0
-  fi
-  kill -TERM $pids 2>/dev/null || true
-  for _ in $(seq 1 25); do
-    pids="$(pgrep -f "$match" 2>/dev/null || true)"
-    if [ -z "$pids" ]; then
-      return 0
-    fi
-    sleep 0.2
-  done
-  echo "⚠️  进程未响应 SIGTERM，改用 SIGKILL：$match（PID: $pids）" >&2
-  kill -KILL $pids 2>/dev/null || true
-  for _ in $(seq 1 10); do
-    pids="$(pgrep -f "$match" 2>/dev/null || true)"
-    if [ -z "$pids" ]; then
-      return 0
-    fi
-    sleep 0.2
-  done
-  echo "❌ 进程仍未退出：$match（PID: $pids）" >&2
-  return 1
-}
-
 echo "==> 停止正式版和旧 DEV（DEV 与正式版同时只跑一个）"
-stop_match "$FORMAL_MATCH" || exit 1
-stop_match "$DEV_EXECUTABLE" || exit 1
+bash "$PROJECT_DIR/scripts/single_instance.sh" || exit 1
 
 if [ ! -x "$ARM64_PYTHON" ]; then
   echo "❌ 找不到项目 Python：$ARM64_PYTHON" >&2

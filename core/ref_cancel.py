@@ -20,34 +20,23 @@ logger = logging.getLogger(__name__)
 TARGET_SR = 16_000
 FRAME_MS = 20
 MAX_LAG_MS = 200
+ESTIMATE_SECONDS = 2.0
 GATE_DB = 6.0
 FLOOR_GAIN = 0.15
 _MIN_REF_RMS = 1e-4
 
 
-def resample_mono(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
-    """线性重采样到目标采样率。整数比时用均值下采样保能量。"""
-    arr = np.asarray(x, dtype=np.float32).ravel()
-    if arr.size == 0 or int(sr_in) == int(sr_out):
-        return arr.astype(np.float32, copy=False)
-    ratio = float(sr_out) / float(sr_in)
-    n_out = max(1, int(round(arr.size * ratio)))
-    if int(sr_in) % int(sr_out) == 0:
-        step = int(sr_in) // int(sr_out)
-        trimmed = arr[: (arr.size // step) * step].reshape(-1, step)
-        return trimmed.mean(axis=1).astype(np.float32)
-    idx = np.linspace(0, arr.size - 1, n_out)
-    lo = np.floor(idx).astype(np.int64)
-    hi = np.minimum(lo + 1, arr.size - 1)
-    frac = (idx - lo).astype(np.float32)
-    return ((1.0 - frac) * arr[lo] + frac * arr[hi]).astype(np.float32)
-
-
 def estimate_lag_samples(mic: np.ndarray, ref: np.ndarray, sr: int,
                          max_lag_ms: int = MAX_LAG_MS) -> int:
-    """互相关估计麦克风相对参考的滞后采样数。正值表示麦克风滞后，需把参考右移对齐。"""
+    """互相关估计麦克风相对参考的滞后采样数。正值表示麦克风滞后，需把参考右移对齐。
+
+    只用前 ESTIMATE_SECONDS 音频估计：时延是系统固定值，全量参与只增加 O(n) 成本。
+    """
     m = np.asarray(mic, dtype=np.float64).ravel()
     r = np.asarray(ref, dtype=np.float64).ravel()
+    cap = int(sr * ESTIMATE_SECONDS)
+    m = m[:cap]
+    r = r[:cap]
     n = min(m.size, r.size)
     if n < int(sr * 0.05):
         return 0
@@ -84,7 +73,6 @@ def align_ref(ref: np.ndarray, n: int, lag: int) -> np.ndarray:
 def suppress_with_ref(mic: np.ndarray, ref: np.ndarray,
                       sr: int = TARGET_SR) -> tuple:
     """块级门控：参考主导块压到 FLOOR_GAIN，人声块保留。
-
     返回 (output, stats)。stats 含 suppressed_ratio 和 lag，供日志诊断。
     任何异常输入返回原声，suppressed_ratio 为 0。
     """
@@ -105,6 +93,8 @@ def suppress_with_ref(mic: np.ndarray, ref: np.ndarray,
     ref_rms_all = float(np.sqrt(np.mean(r.astype(np.float64) ** 2)))
     if ref_rms_all < _MIN_REF_RMS:
         return m, {"suppressed_ratio": 0.0, "lag": 0}
+    import time as _time
+    cancel_start = _time.time()
     lag = estimate_lag_samples(m, r, sr)
     aligned = align_ref(r, n, lag)
     frame = max(1, int(sr * FRAME_MS / 1000))
@@ -125,5 +115,8 @@ def suppress_with_ref(mic: np.ndarray, ref: np.ndarray,
         out[start: start + frame] = (m[start: start + frame] * FLOOR_GAIN).astype(np.float32)
         suppressed += 1
     stats = {"suppressed_ratio": (suppressed / total) if total else 0.0, "lag": lag}
-    logger.info("ref cancel：lag=%d suppressed=%.2f", lag, stats["suppressed_ratio"])
+    logger.info(
+        "ref cancel：lag=%d suppressed=%.2f elapsed=%.2fs",
+        lag, stats["suppressed_ratio"], _time.time() - cancel_start,
+    )
     return out, stats

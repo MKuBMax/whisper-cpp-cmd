@@ -14,7 +14,7 @@ subprocess.run(..., encoding="utf-8", errors="replace")
 
 或者使用 bytes，并显式调用 decode("utf-8")。
 
-已盘点并修复的重点区域包括 process_guard.py、media_ducker.py 和 clipboard.py。模型进程把输出重定向到文件的 text=True 不经过 Python 解码，不属于同一风险。
+已盘点并修复的重点区域包括 process_guard.py、sysref.py 和 clipboard.py。模型进程把输出重定向到文件的 text=True 不经过 Python 解码，不属于同一风险。
 
 看到 UnicodeDecodeError: 'ascii' codec 时，优先排查真实 GUI 进程，而不是只在终端里复现；终端环境通常无法复现该问题。
 

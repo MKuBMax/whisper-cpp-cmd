@@ -33,6 +33,39 @@ _TAG_JSON = 1
 _READY_TIMEOUT = 8.0
 _STOP_TIMEOUT = 5.0
 
+_HEADPHONE_MARKERS = (
+    "airpods", "headphone", "headphones", "headset", "earphone",
+    "earbuds", "buds", "airpods", "耳机", "蓝牙", "bluetooth",
+)
+
+_BUILTIN_SPEAKER_MARKERS = ("扬声器", "speaker", "built-in", "macbook")
+
+
+def is_headphone_output(name) -> bool:
+    """默认输出是耳机时返回 True。耳机不串音，跳过 sysref 采集。
+
+    判定只看设备名特征，未知名返回 False（宁可多采一次，不漏消除）。
+    """
+    lowered = (name or "").lower()
+    if not lowered:
+        return False
+    if any(m in lowered for m in _BUILTIN_SPEAKER_MARKERS):
+        return False
+    return any(m in lowered for m in _HEADPHONE_MARKERS)
+
+
+def default_output_device_name() -> str:
+    """返回当前默认输出设备名；查询失败返回空串。"""
+    try:
+        import sounddevice as sd
+        idx = sd.default.device[1]
+        if idx is None:
+            return ""
+        return str(sd.query_devices(idx).get("name", "") or "")
+    except Exception as e:
+        logger.debug("查询默认输出设备失败：%s", e)
+        return ""
+
 
 def _helper_path() -> str:
     here = os.path.dirname(os.path.abspath(__file__))

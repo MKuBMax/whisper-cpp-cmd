@@ -54,10 +54,6 @@ class StatusBarController(NSObject):
         self.status_bar_title_item = None
         self.login_at_startup_item = None
         self.vad_item = None
-        self.duck_item = None
-        self.duck_submenu = None
-        self.duck_enable_item = None
-        self.duck_headphones_item = None
         self.ref_cancel_item = None
         self.overlay_item = None
         self.overlay_menu_item = None
@@ -128,7 +124,6 @@ class StatusBarController(NSObject):
         item(self.preferences_menu, "login_at_startup_item", "登录时启动", "toggleLoginAtStartup:")
         item(self.preferences_menu, "show_in_dock_item", "在 Dock 显示", "toggleShowInDock:")
         item(self.preferences_menu, "overlay_item", "显示录音浮窗", "toggleOverlay:")
-        item(self.preferences_menu, "duck_enable_item", "录音时降低其他声音", "toggleDuckMedia:")
         item(self.preferences_menu, "ref_cancel_item", "系统音频参考消除", "toggleRefCancel:")
         item(self.preferences_menu, "edit_glossary_item", "编辑术语表…", "editGlossary:")
         item(self.preferences_menu, "reload_glossary_item", "应用术语表", "reloadGlossary:")
@@ -376,18 +371,6 @@ class StatusBarController(NSObject):
                 AppKit.NSControlStateValueOn if enabled else AppKit.NSControlStateValueOff
             )
 
-    def setDuckMedia_(self, enabled):
-        if self.duck_enable_item is not None:
-            self.duck_enable_item.setState_(
-                AppKit.NSControlStateValueOn if enabled else AppKit.NSControlStateValueOff
-            )
-
-    def setDuckHeadphones_(self, enabled):
-        if self.duck_headphones_item is not None:
-            self.duck_headphones_item.setState_(
-                AppKit.NSControlStateValueOn if enabled else AppKit.NSControlStateValueOff
-            )
-
     def setOverlay_(self, enabled):
         if self.overlay_item is not None:
             self.overlay_item.setState_(
@@ -580,12 +563,6 @@ class StatusBarController(NSObject):
 
     def toggleRefCancel_(self, sender):
         self.app.toggle_ref_cancel()
-
-    def toggleDuckMedia_(self, sender):
-        self.app.toggle_duck_media()
-
-    def toggleDuckHeadphones_(self, sender):
-        self.app.toggle_duck_headphones()
 
     def toggleOverlay_(self, sender):
         self.app.toggle_overlay()

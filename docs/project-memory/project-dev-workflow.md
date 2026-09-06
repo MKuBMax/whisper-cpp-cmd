@@ -9,10 +9,14 @@
 用于改代码、跑测试、调试和让用户试用：
 
 ```sh
-bash run_dev.sh
+bash run_dev_app.sh
 ```
 
-开发模式直接运行 `.venv-arm64/bin/python` 的源码，不构建、不签名、不替换 `/Applications/WhisperCppCmd.app`，因此不会因每次调试重装 App 而反复触发 macOS 权限授权。
+开发模式构建 DEV App（alias 引用源码，改完即生效），bundle 身份与正式版隔离，
+麦克风和辅助功能各自独立授权。正式版与 DEV 同时只跑一个，启动前经
+`scripts/single_instance.sh` 互斥。裸 Python 启动（`run_dev.sh`）已下线：
+无 bundle 权限身份且会与 DEV 双跑抢热键。测试不受影响，仍用
+`.venv-arm64/bin/python -m pytest tests/`。
 
 ### 发布模式（需要用户明确授权）
 

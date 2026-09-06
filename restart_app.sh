@@ -45,9 +45,14 @@ stop_app() {
     fi
     sleep 0.2
   done
-  echo "❌ 进程仍未退出，可能需手动处理：$pids" >&2
+  echo "❌ 进程仍未退出，阻止新实例启动：$pids" >&2
   return 1
 }
+
+# 单实例互斥：启动正式版前先停掉 DEV（DEV 与正式版同时只跑一个）。
+if ! bash "$PROJECT_DIR/scripts/single_instance.sh"; then
+  exit 1
+fi
 
 if ! stop_app "$MATCH"; then
   exit 1

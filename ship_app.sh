@@ -63,7 +63,10 @@ fi
 rm -rf "$STAGING"
 ditto "$PACKAGE_APP" "$STAGING"
 
-echo "==> 退出运行中的 App"
+echo "==> 退出运行中的 App（正式版与 DEV 同时只跑一个）"
+if ! bash "$PROJECT_DIR/scripts/single_instance.sh"; then
+  exit 1
+fi
 if ! stop_app "${INSTALLED}/Contents/MacOS/${APP_NAME}"; then
   exit 1
 fi

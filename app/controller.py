@@ -134,7 +134,6 @@ from config.version import APP_VERSION, UPDATE_REPOSITORY
 from core.dictation_trace import DictationTrace
 from core.pipeline import Pipeline, PipelineConfig, AudioConfig
 from core.perf_log import append_perf_log
-from core.media_ducker import MediaDucker
 from core.stats import format_stats, load_perf_records, summarize_perf_records
 from core.update_checker import (
     cleanup_staged_app,
@@ -273,9 +272,6 @@ class VoiceInputApp:
     def __init__(self):
         self._logger = logging.getLogger(__name__)
         self.settings = Settings.load()
-        self._media_ducker = MediaDucker(
-            self.settings.duck_media, self.settings.duck_volume,
-            self.settings.duck_when_headphones)
         self._sysref = None
         self.pipeline: Pipeline = None
         self.listener: keyboard.Listener | None = None
@@ -1007,8 +1003,6 @@ class VoiceInputApp:
         AppHelper.callAfter(self.status_bar.setVad_, self.settings.use_vad)
         AppHelper.callAfter(self.status_bar.setOverlay_, self.settings.show_overlay)
         AppHelper.callAfter(self.status_bar.setOverlayFollowMouse_, self.settings.overlay_follow_mouse)
-        AppHelper.callAfter(self.status_bar.setDuckMedia_, self.settings.duck_media)
-        AppHelper.callAfter(self.status_bar.setDuckHeadphones_, self.settings.duck_when_headphones)
         if hasattr(self.status_bar, "setRefCancel_"):
             AppHelper.callAfter(self.status_bar.setRefCancel_, self.settings.ref_cancel)
         AppHelper.callAfter(self.status_bar.setChineseScriptOptions_, self._get_chinese_script_options())
@@ -1666,37 +1660,20 @@ class VoiceInputApp:
         self._logger.info("系统音频参考消除切换：%s", self.settings.ref_cancel)
         print(f"🔇 系统音频参考消除已{'开启' if self.settings.ref_cancel else '关闭'}")
 
-    def toggle_duck_media(self):
-        self.settings.duck_media = not self.settings.duck_media
-        self.settings.save()
-        # 即时生效：把开关同步给已构造的 MediaDucker（无需重建对象）
-        self._media_ducker.set_enabled(self.settings.duck_media)
-        # 关闭瞬间回弹音量（若当前正 duck）；restore 幂等且不读 _enabled，
-        # 非录音态（_pre_duck_volume=None）亦安全空操作。
-        if not self.settings.duck_media:
-            self._media_ducker.restore()
-        self._refresh_status_bar_details()
-        self._logger.info("录音压低音量切换：%s", self.settings.duck_media)
-        print(f"🔉 录音压低音量已{'开启' if self.settings.duck_media else '关闭'}")
-
-    def toggle_duck_headphones(self):
-        self.settings.duck_when_headphones = not self.settings.duck_when_headphones
-        self.settings.save()
-        self._media_ducker.set_duck_when_headphones(self.settings.duck_when_headphones)
-        self._refresh_status_bar_details()
-        self._logger.info("戴耳机时也压低切换：%s", self.settings.duck_when_headphones)
-        print(f"🎧 戴耳机时也压低已{'开启' if self.settings.duck_when_headphones else '关闭'}")
-
     def _start_sysref(self):
         """录音开始时后台启动系统参考采集。失败静默，调用方回退 raw 链路。
 
         不阻塞按键到录音：同步 start 要等 ready（权限弹窗时可达 8s），
-        故扔后台线程，主流程继续。参考没 ready 时 stop 返回 None 即回退。"""
+        故扔后台线程，主流程继续。参考没 ready 时 stop 返回 None 即回退。
+        耳机输出直接跳过：耳机不串音，且 ScreenCaptureKit 建流会让蓝牙音乐顿一下。"""
         self._sysref = None
         if not self.settings.ref_cancel:
             return
         try:
-            from core.sysref import SysRefCapture
+            from core.sysref import SysRefCapture, default_output_device_name, is_headphone_output
+            if is_headphone_output(default_output_device_name()):
+                self._logger.info("sysref 跳过：耳机输出不串音")
+                return
             cap = SysRefCapture()
             self._sysref = cap
             thread = threading.Thread(
@@ -1932,7 +1909,6 @@ class VoiceInputApp:
                     self._handle_release(trace)
             except Exception:
                 self._logger.exception("dictation worker 处理 %s 异常", kind)
-                self._media_ducker.restore()
                 self._set_state("error")
                 if getattr(self, "_feedback", None) is not None:
                     AppHelper.callAfter(self._feedback.show_message, "录音未完成，请重试")
@@ -1966,7 +1942,6 @@ class VoiceInputApp:
         self._logger.info("%s 按键按下：右Command（worker 处理）", trace.prefix("press") if trace else "[press]")
         if not self.pipeline.is_recording:
             if self.pipeline.start_recording():
-                self._media_ducker.begin()  # ducking：尽早压低系统音量，减少扬声器音乐串扰
                 self._start_sysref()
                 self._backend_released = False
                 self._set_state("recording")
@@ -2032,7 +2007,6 @@ class VoiceInputApp:
                 if getattr(self, "_feedback", None) is not None:
                     AppHelper.callAfter(self._feedback.show_message, "识别未完成，请重试")
                 self._last_result = f"错误：{e}"
-                self._media_ducker.restore()
                 self._set_state("error")
                 self._refresh_status_bar_details()
                 self._schedule_idle_release_timer()
@@ -2089,7 +2063,6 @@ class VoiceInputApp:
                 print(f"❌ {result.error}")
                 self._last_result = f"错误：{result.error}"
                 self._set_state("error")
-            self._media_ducker.restore()
             self._refresh_status_bar_details()
             self._schedule_idle_release_timer()
             self._logger.info("%s 本次听写流程结束", trace.prefix("complete") if trace else "[complete]")
