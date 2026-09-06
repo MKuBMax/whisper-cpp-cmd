@@ -44,23 +44,11 @@ class FeedbackController(NSObject):
         view.addSubview_(self.label)
         return self
 
-    @objc.python_method
     def show_message(self, text, timeout=1.0):
-        NSObject.cancelPreviousPerformRequestsWithTarget_(self)
-        screen = AppKit.NSScreen.mainScreen()
-        frame = screen.visibleFrame() if screen is not None else AppKit.NSMakeRect(0, 0, 1440, 900)
-        self.panel.setFrameOrigin_(AppKit.NSMakePoint(
-            frame.origin.x + (frame.size.width - _WIDTH) / 2,
-            frame.origin.y + _MARGIN_BOTTOM,
-        ))
-        value = str(text or "")
-        if len(value) > 18:
-            value = value[:17] + "…"
-        self.label.setStringValue_(value)
-        self.panel.setAlphaValue_(1.0)
-        self.panel.orderFrontRegardless()
-        if timeout is not None:
-            self.performSelector_withObject_afterDelay_("hide:", None, timeout)
+        """已废弃：单胶囊重构后由 RecordingOverlay.show_status 接管。
+
+        保留空壳兼容旧调用，实际不再建第二个 panel，避免与录音胶囊打架。"""
+        return
 
     def hide_(self, sender):
         self.panel.orderOut_(None)

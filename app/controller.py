@@ -150,7 +150,6 @@ from ui.overlay_window import RecordingOverlay
 from ui.settings_window import SettingsWindowController
 from ui.dashboard_window import DashboardWindowController
 from core.model_download import ModelDownload, RECOMMENDED_MODEL
-from ui.feedback import FeedbackController
 from ui.stats_window import StatsWindowController
 from ui.onboarding_window import OnboardingWindowController
 from app import diagnostics
@@ -312,7 +311,7 @@ class VoiceInputApp:
         self._input_monitoring_trusted: bool | None = None
         self._permission_repair_alert_key = None
         self._overlay: RecordingOverlay | None = None
-        self._feedback = None
+        self._capsule_generation: int = 0  # 单胶囊代次：每次按下自增，旧结果定时凭代次失效
         self._model_download = ModelDownload()
         self._model_loader_thread = None
         self._settings_window: SettingsWindowController | None = None
@@ -357,8 +356,6 @@ class VoiceInputApp:
         except Exception:
             self._logger.exception("录音浮窗构建失败，将禁用")
             self._overlay = None
-
-        self._feedback = FeedbackController.alloc().init()
 
         self._refresh_status_bar_details()
         self._refresh_status_bar_dynamic_details()
@@ -954,6 +951,7 @@ class VoiceInputApp:
         ]
 
     def _set_state(self, state: str):
+        """切换状态。胶囊可见性由 _capsule_* 方法单独管理，见 _capsule_show_recording 等。"""
         prev = self._state
         if state not in _STATES:
             self._logger.warning("未知状态被拒绝：%s（当前保持 %s）", state, prev)
@@ -971,12 +969,26 @@ class VoiceInputApp:
             AppHelper.callAfter(self.status_bar.setState_, state)
         if state == "error":
             self._schedule_error_reset()
-        if state == "recording":
-            if getattr(self, "_feedback", None) is not None:
-                AppHelper.callAfter(self._feedback.hide_, None)
-            self._show_overlay()
-        else:
-            self._hide_overlay()
+
+    def _capsule_show_recording(self):
+        """单胶囊状态机：录音中。generation+1 让旧结果定时失效，新 show 无条件接管。"""
+        if self._overlay is None:
+            return
+        self._capsule_generation += 1
+        AppHelper.callAfter(self._overlay.show)
+
+    def _capsule_show_busy(self):
+        """单胶囊状态机：识别中，常驻直到结果到达。generation 不变，仍是本次录音。"""
+        if self._overlay is None:
+            return
+        AppHelper.callAfter(self._overlay.show_status, "正在识别…", None, self._capsule_generation)
+
+    def _capsule_show_result(self, message):
+        """单胶囊状态机：结果提示 1 秒后自动熄灭。generation 快照随调用带入 overlay，
+        旧结果定时到点时 generation 已变，直接丢弃，不存在误杀。"""
+        if self._overlay is None:
+            return
+        AppHelper.callAfter(self._overlay.show_status, message, 1.0, self._capsule_generation)
 
     def _refresh_status_bar_details(self):
         if self.status_bar is None:
@@ -1730,8 +1742,8 @@ class VoiceInputApp:
         if not text:
             return False
         ok = self.copy_text(text)
-        if ok and self._feedback is not None:
-            AppHelper.callAfter(self._feedback.show_message, "已复制到剪贴板")
+        if ok:
+            self._capsule_show_result("已复制到剪贴板")
         return ok
 
     def get_recent_history(self, count: int = 20):
@@ -1917,8 +1929,7 @@ class VoiceInputApp:
             except Exception:
                 self._logger.exception("dictation worker 处理 %s 异常", kind)
                 self._set_state("error")
-                if getattr(self, "_feedback", None) is not None:
-                    AppHelper.callAfter(self._feedback.show_message, "录音未完成，请重试")
+                self._capsule_show_result("录音未完成，请重试")
             finally:
                 self._worker_busy = False
 
@@ -1951,7 +1962,9 @@ class VoiceInputApp:
             if self.pipeline.start_recording():
                 self._start_sysref()
                 self._backend_released = False
+                # 单胶囊：按下即 show，不等首帧。开头 90ms 由流预热兜住。
                 self._set_state("recording")
+                self._capsule_show_recording()
                 self._refresh_status_bar_details()
                 print("\n🎤 录音中...")
                 if self.pipeline.audio_source.fell_back_to_default:
@@ -1997,8 +2010,7 @@ class VoiceInputApp:
             if self.settings.dictation_mode == "preview" and self._live_dictation is not None:
                 self._live_dictation.stop()
             self._set_state("processing")
-            if getattr(self, "_feedback", None) is not None:
-                AppHelper.callAfter(self._feedback.show_message, "正在识别…", None)
+            self._capsule_show_busy()
             print("⏳ 转录中...")
             self._logger.info("%s 开始 stop_recording", trace.prefix("stop_recording") if trace else "[stop_recording]")
 
@@ -2011,8 +2023,7 @@ class VoiceInputApp:
                 result = self.pipeline.stop_recording(paste_output=paste_output)
             except Exception as e:
                 self._logger.exception("stop_recording 异常")
-                if getattr(self, "_feedback", None) is not None:
-                    AppHelper.callAfter(self._feedback.show_message, "识别未完成，请重试")
+                self._capsule_show_result("识别未完成，请重试")
                 self._last_result = f"错误：{e}"
                 self._set_state("error")
                 self._refresh_status_bar_details()
@@ -2021,14 +2032,14 @@ class VoiceInputApp:
                 return
 
             self._log_perf(result, trace)
-            if getattr(self, "_feedback", None) is not None:
+            if self._overlay is not None:
                 delivery = getattr(self.pipeline.clipboard, "last_delivery", "none")
                 message = ("未检测到语音" if result.no_speech else
                            "已复制到剪贴板" if delivery == "copied" else
                            "已发送到输入光标" if delivery == "sent" else
                            "复制失败，可从菜单栏复制最近结果" if result.success else
                            "录音未完成，请按住快捷键说话")
-                AppHelper.callAfter(self._feedback.show_message, message)
+                self._capsule_show_result(message)
             overflow = self.pipeline.audio_source.overflow
             if result.success:
                 no_speech = bool(getattr(result, "no_speech", False))

@@ -850,6 +850,9 @@ class RecordingOverlay(NSObject):
         self._level_provider: Callable[[], float] = lambda: 0.0
         self._panel: Optional[AppKit.NSPanel] = None
         self._label: Optional[AppKit.NSTextField] = None
+        self._status_label: Optional[AppKit.NSTextField] = None
+        self._status_generation: int = 0
+        self._mode: str = "recording"  # recording | status
         self._wave: Optional[_WaveformView] = None
         self._dot: Optional[AppKit.NSView] = None
         self._timer: Optional[AppKit.NSTimer] = None
@@ -940,14 +943,27 @@ class RecordingOverlay(NSObject):
         wave = _WaveformView.alloc().init()
         wave.setFrame_(NSMakeRect(_WIDTH - 14 - _WAVE_WIDTH, 8, _WAVE_WIDTH, _HEIGHT - 16))
 
+        # 状态文字（与时长 label 同位置互斥显示：录音态显示时长，状态态显示提示语）
+        status_label = AppKit.NSTextField.alloc().initWithFrame_(
+            NSMakeRect(28, (_HEIGHT - 16) / 2.0, _WIDTH - 28 - 10, 16)
+        )
+        status_label.setEditable_(False)
+        status_label.setSelectable_(False)
+        status_label.setBezeled_(False)
+        status_label.setDrawsBackground_(False)
+        status_label.setAlignment_(AppKit.NSTextAlignmentCenter)
+        status_label.setHidden_(True)
+
         content.addSubview_(dot)
         content.addSubview_(label)
+        content.addSubview_(status_label)
         content.addSubview_(wave)
         container.addSubview_(content)
         panel.setContentView_(container)
 
         self._panel = panel
         self._label = label
+        self._status_label = status_label
         self._wave = wave
         self._dot = dot
         logger.info("录音浮窗已构建：%sx%s（半透明胶囊）", _WIDTH, _HEIGHT)
@@ -1016,9 +1032,41 @@ class RecordingOverlay(NSObject):
 
     # ---------------- 显示 / 隐藏（带 ease-out 动画 + 防重入） ----------------
 
+    def _enter_recording_mode(self):
+        """切录音态：红点加时长加波形可见，状态文字隐藏。"""
+        self._mode = "recording"
+        if self._dot is not None:
+            self._dot.setHidden_(False)
+        if self._label is not None:
+            self._label.setHidden_(False)
+        if self._wave is not None:
+            self._wave.setHidden_(False)
+        if self._status_label is not None:
+            self._status_label.setHidden_(True)
+        self._startBreath()
+
+    def _enter_status_mode(self, text: str):
+        """切状态态：隐藏录音元素，居中显示提示语。红点呼吸和波形 tick 一并停掉。"""
+        self._mode = "status"
+        self._stopBreath()
+        self._stopTimer()
+        if self._dot is not None:
+            self._dot.setHidden_(True)
+        if self._label is not None:
+            self._label.setHidden_(True)
+        if self._wave is not None:
+            self._wave.setHidden_(True)
+        if self._status_label is not None:
+            value = str(text or "")
+            if len(value) > 18:
+                value = value[:17] + "…"
+            self._status_label.setStringValue_(value)
+            self._status_label.setHidden_(False)
+
     def show(self):
         if self._panel is None:
             return
+        self._enter_recording_mode()
         # 每次显示按当前主屏重算 home（切屏后宽度/原点可能变化，避免浮窗跑偏）
         self._home_frame = self._computeHomeFrame()
         if self._backdrop is not None:
@@ -1033,9 +1081,8 @@ class RecordingOverlay(NSObject):
         if self._label is not None:
             self._label.setStringValue_("00:00")
         self._startTimer()
-        self._startBreath()
 
-        if self._visible:
+        if self._visible and self._mode == "recording":
             # 已可见（静止或正在淡入）。若正卡在淡出中途，把 alpha 平滑拉回 1。
             if self._panel.alphaValue() < 0.999:
                 self._panel.animator().setAlphaValue_(1.0)
@@ -1062,6 +1109,52 @@ class RecordingOverlay(NSObject):
 
         self._visible = True
         self._updateBackdrop()  # 首帧立即采样，避免淡入动画先闪一帧无模糊
+
+    def show_status(self, text, timeout=1.0, generation=0):
+        """单胶囊状态提示：复用录音 panel 显示提示语，timeout 秒后自动 hide。
+
+        取代已废弃的 FeedbackController.show_message。generation 是 controller 的
+        _capsule_generation 快照：定时到点时若代次已变（新一轮录音开始），直接丢弃，
+        杜绝旧结果定时误杀新胶囊。timeout=None 表示常驻（转写中）。"""
+        if self._panel is None:
+            return
+        self._status_generation = generation
+        self._enter_status_mode(text)
+        self._home_frame = self._computeHomeFrame()
+        if self._backdrop is not None:
+            self._backdrop.invalidateBackdrop()
+        NSObject.cancelPreviousPerformRequestsWithTarget_(self)
+        self._animating_out = False
+        if not self._visible:
+            p = self._panel
+            p.setAlphaValue_(0.0)
+            start_frame = self._mouseFollowFrame() if self._follow_mouse else self._home_frame
+            p.setFrame_display_(start_frame, False)
+            p.orderFront_(None)
+            AppKit.NSAnimationContext.beginGrouping()
+            ctx = AppKit.NSAnimationContext.currentContext()
+            ctx.setDuration_(_SHOW_DURATION)
+            ctx.setTimingFunction_(_EASE_OUT)
+            p.animator().setAlphaValue_(1.0)
+            AppKit.NSAnimationContext.endGrouping()
+            self._visible = True
+            self._updateBackdrop()
+        elif self._panel.alphaValue() < 0.999:
+            self._panel.animator().setAlphaValue_(1.0)
+        if timeout is not None:
+            self.performSelector_withObject_afterDelay_("hideStatus:", generation, timeout)
+
+    def hideStatus_(self, generation):
+        # 定时熄灭只在同代次结果态生效：新一轮录音已开始则丢弃，避免旧定时杀新胶囊。
+        try:
+            generation = int(generation)
+        except (TypeError, ValueError):
+            generation = -1
+        if generation != getattr(self, "_status_generation", 0):
+            return
+        if self._mode != "status":
+            return
+        self.hide()
 
     def hide(self):
         if self._panel is None:
