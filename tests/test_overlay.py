@@ -30,19 +30,19 @@ def test_rms_to_bar_level_endpoints_and_clamp():
     assert rms_to_bar_level(0.0) == 0.0
     assert rms_to_bar_level(-1.0) == 0.0
     assert rms_to_bar_level(0.003) == 0.0     # 底噪(-50.5dB)在 floor 之下，归零
-    assert rms_to_bar_level(0.06) == 1.0      # -24.4dB 在 ceil 之上，顶满
+    assert rms_to_bar_level(0.30) == 1.0      # -10.5dB 在 ceil 之上，顶满
 
 
 def test_rms_to_bar_level_speech_range():
-    """按 2026-08-15 overlay tick 日志实测标定：正常说话须落在中高段（可见跳动），
-    大声接近顶满——上一版线性映射正常说话趴底的问题由本测试锁住。"""
-    quiet = rms_to_bar_level(0.008)   # -42dB 正常说话低段（实测）
-    normal = rms_to_bar_level(0.015)  # -36.5dB 正常说话（实测）
-    loud = rms_to_bar_level(0.03)     # -30.5dB 大声（实测）
-    assert 0.4 < quiet < 0.7
-    assert 0.6 < normal < 0.9
-    assert loud > 0.8
-    assert quiet < normal < loud  # 单调
+    """按 2026-09-06 近讲复测标定：正常说话须落在中段（可见跳动），
+    大声接近顶满。ceil 从 -26dB 抬到 -12dB，此前的上限把日常说话全压满。"""
+    quiet = rms_to_bar_level(0.05)    # -26dB 正常说话低段
+    normal = rms_to_bar_level(0.10)   # -20dB 正常说话
+    loud = rms_to_bar_level(0.25)     # -12dB 大声
+    assert 0.6 < quiet < 0.9
+    assert 0.7 < normal < 1.0
+    assert loud >= 0.99
+    assert quiet < normal <= loud  # 单调
 
 
 def test_rms_to_bar_level_monotonic():
