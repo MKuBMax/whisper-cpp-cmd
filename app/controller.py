@@ -490,6 +490,7 @@ class VoiceInputApp:
 
         self.pipeline = Pipeline(pipeline_config)
         self.pipeline.before_transcribe = self._wait_for_backend_warmup
+        self.pipeline.fetch_ref_audio = self._end_sysref_segment
         self.pipeline.trace = None
         self.pipeline.audio_source.trace = None
         self.pipeline.model_engine.trace = None
@@ -1727,24 +1728,28 @@ class VoiceInputApp:
             self._logger.warning("系统参考切段失败，回退原声", exc_info=True)
             self._sysref_skip_segment = True
 
-    def _stop_sysref_into_pipeline(self):
-        """录音结束：切出本段 PCM。helper 继续跑。"""
-        if self.pipeline is not None:
-            self.pipeline.config.ref_audio = None
+    def _end_sysref_segment(self):
+        """麦克风停后再切本段 PCM。helper 继续跑。"""
         if self._sysref_skip_segment:
-            return
+            return None
         with self._sysref_lock:
             cap = self._sysref
         if cap is None:
-            return
+            return None
         try:
             ref = cap.end_segment()
         except Exception:
             self._logger.warning("系统参考切段结束失败，回退原声", exc_info=True)
-            return
-        if ref is not None and self.pipeline is not None:
-            self.pipeline.config.ref_audio = ref
+            return None
+        if ref is not None:
             self._logger.info("系统参考音频就绪：samples=%s", len(ref))
+        return ref
+
+    def _stop_sysref_into_pipeline(self):
+        """录音启动失败时丢掉本段，helper 继续跑。"""
+        if self.pipeline is not None:
+            self.pipeline.config.ref_audio = None
+        self._end_sysref_segment()
 
     def _shutdown_sysref(self):
         with self._sysref_lock:
@@ -2012,7 +2017,6 @@ class VoiceInputApp:
             self._logger.info("%s 开始 stop_recording", trace.prefix("stop_recording") if trace else "[stop_recording]")
 
             try:
-                self._stop_sysref_into_pipeline()
                 result = self.pipeline.stop_recording(paste_output=True)
             except Exception as e:
                 self._logger.exception("stop_recording 异常")

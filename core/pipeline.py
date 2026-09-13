@@ -97,6 +97,7 @@ class Pipeline:
         self._is_initialized = False
         self._on_complete_callback: Optional[Callable] = None
         self.trace: Optional[DictationTrace] = None
+        self.fetch_ref_audio = None
     
     @property
     def is_initialized(self) -> bool:
@@ -197,7 +198,20 @@ class Pipeline:
         if isinstance(trace, DictationTrace):
             logger.info("%s pipeline.start_recording done", trace.prefix("pipeline"))
         return True
-    
+
+    def _fetch_ref_audio(self) -> None:
+        """麦克风停后再切系统参考，避免参考比麦先结束。"""
+        getter = getattr(self, "fetch_ref_audio", None)
+        if not callable(getter):
+            return
+        try:
+            fetched = getter()
+        except Exception:
+            logger.warning("切取系统参考失败，回退原声", exc_info=True)
+            return
+        if fetched is not None:
+            self.config.ref_audio = fetched
+
     def stop_recording(self, paste_output: bool = True) -> PipelineResult:
         """
         停止录音并执行完整流程
@@ -220,7 +234,8 @@ class Pipeline:
         try:
             self.recorder.stop()
             audio_data = self.audio_source.stop_recording()
-            
+            self._fetch_ref_audio()
+
             if audio_data is None or len(audio_data) == 0:
                 logger.warning("停止录音后没有音频数据")
                 return PipelineResult(

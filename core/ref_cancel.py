@@ -71,7 +71,11 @@ def estimate_lag_samples(mic: np.ndarray, ref: np.ndarray, sr: int,
 
 
 def align_ref(ref: np.ndarray, n: int, lag: int) -> np.ndarray:
-    """按时延把参考对齐到麦克风长度。lag>0 表示麦克风滞后，参考右移 lag；超界补零，不插值。"""
+    """按时延把参考对齐到麦克风长度。lag>0 表示麦克风滞后，参考右移 lag；超界补零，不插值。
+
+    参考比麦长时（预滚在开头）必须从完整参考里取齐 n 点，不能用 r[-lag:n]
+    把尾巴截掉。
+    """
     out = np.zeros(n, dtype=np.float32)
     r = np.asarray(ref, dtype=np.float32).ravel()
     if r.size == 0 or n <= 0:
@@ -81,8 +85,10 @@ def align_ref(ref: np.ndarray, n: int, lag: int) -> np.ndarray:
             seg = r[: n - lag]
             out[lag: lag + seg.size] = seg
     else:
-        seg = r[-lag: n] if -lag < n else r[:0]
-        out[: seg.size] = seg
+        start = -lag
+        if start < r.size:
+            seg = r[start: start + n]
+            out[: seg.size] = seg
     return out
 
 
@@ -172,10 +178,7 @@ def suppress_with_ref(mic: np.ndarray, ref: np.ndarray,
         logger.info("ref cancel skipped: ref empty or non-finite")
         return m, empty
     n = m.size
-    raw_ref_n = r.size
-    r = r[:n] if r.size > n else np.pad(r, (0, n - r.size))
-    valid_n = min(raw_ref_n, n)
-    ref_rms_all = _rms(r[:valid_n]) if valid_n else 0.0
+    ref_rms_all = _rms(r)
     if ref_rms_all < _MIN_REF_RMS:
         logger.info("ref cancel skipped: ref_rms=%.6f below %.1e", ref_rms_all, _MIN_REF_RMS)
         return m, {**empty, "ref_rms": ref_rms_all}

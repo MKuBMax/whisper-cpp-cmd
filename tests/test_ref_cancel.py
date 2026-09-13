@@ -23,6 +23,14 @@ def test_align_finds_delay():
     assert abs(lag - delay) <= 8
 
 
+def test_align_negative_lag_keeps_ref_tail():
+    n = 1000
+    preroll = 250
+    ref = np.arange(n + preroll, dtype=np.float32)
+    aligned = align_ref(ref, n, -preroll)
+    assert np.array_equal(aligned, ref[preroll: preroll + n])
+
+
 def test_estimate_uses_loudest_window():
     sr = 16_000
     delay = 160
@@ -77,6 +85,18 @@ def test_length_mismatch_handled():
     out, _stats = suppress_with_ref(mic, short_ref, sr)
     assert len(out) == len(mic)
     assert np.all(np.isfinite(out))
+
+
+def test_suppress_cancels_tail_when_ref_has_preroll():
+    sr = 16_000
+    preroll = 4_000
+    music = _sine(440.0, sr, sr, amp=0.3)
+    ref = np.concatenate([np.zeros(preroll, dtype=np.float32), music])
+    out, stats = suppress_with_ref(music, ref, sr)
+    assert abs(stats["lag"] + preroll) <= 8
+    tail_in = float(np.sqrt(np.mean(music[-sr // 4 :].astype(np.float64) ** 2)))
+    tail_out = float(np.sqrt(np.mean(out[-sr // 4 :].astype(np.float64) ** 2)))
+    assert tail_out < tail_in * 0.5
 
 
 def test_align_ref_puts_peak_on_mic_peak():

@@ -80,3 +80,21 @@ def test_capture_stops_before_waiting_for_model():
         text="", model_name="large-v3", success=True, error=None, rtf=0.1))
     pipeline.stop_recording()
     assert events[:4] == ["stop recorder", "stop microphone", "wait for model", "transcribe"]
+
+
+def test_ref_is_cut_after_microphone_stops():
+    pipeline = _pipeline_for_audio(np.full(16_000, 0.02, dtype=np.float32))
+    events = []
+    pipeline.config.ref_cancel = True
+    pipeline.audio_source.stop_recording = lambda: (
+        events.append("stop microphone") or np.full(16_000, 0.02, dtype=np.float32)
+    )
+    pipeline.fetch_ref_audio = lambda: events.append("cut sysref") or np.zeros(100, dtype=np.float32)
+    pipeline.before_transcribe = lambda: events.append("wait for model")
+    pipeline.model_engine.transcribe = lambda *a, **k: (
+        events.append("transcribe")
+        or SimpleNamespace(text="", model_name="large-v3", success=True, error=None, rtf=0.1)
+    )
+    pipeline.stop_recording()
+    assert events.index("stop microphone") < events.index("cut sysref")
+    assert events.index("cut sysref") < events.index("wait for model")
