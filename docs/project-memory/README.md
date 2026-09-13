@@ -26,7 +26,7 @@
 - [音频卡死根因：僵尸 AudioUnit](hang-root-cause-zombie-audiounit.md)
 - [音频自愈策略对比](audio-strategy-github-comparison.md)
 - [音频自愈系统维护禁区](audio-self-healing-maintenance.md)
-- [扬声器音乐串扰与系统音频参考消除](music-bleed-ref-cancel.md)（2026-09-13 真机验收，维护禁区）
+- [扬声器音乐串扰与系统音频参考消除](music-bleed-ref-cancel.md)（关键方案：常驻采集 + 频点相干，维护禁区）
 - [GUI 子进程 UTF-8 坑](gui-subprocess-ascii-decode-trap.md)
 - [浮窗玻璃材质实验结论](overlay-glass-experiments.md)
 

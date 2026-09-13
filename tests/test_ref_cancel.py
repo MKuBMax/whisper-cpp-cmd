@@ -49,8 +49,9 @@ def test_gate_suppresses_music_only():
 def test_gate_preserves_loud_speech_over_music():
     sr = 16_000
     music = _sine(440.0, sr, sr, amp=0.2)
+    rng = np.random.default_rng(1)
     mic = music.copy()
-    burst = _sine(880.0, sr // 3, sr, amp=0.9)
+    burst = rng.standard_normal(sr // 3).astype(np.float32) * 0.9
     mic[sr // 3: sr // 3 + sr // 3] += burst
     mic = np.clip(mic, -1.0, 1.0).astype(np.float32)
     out, _stats = suppress_with_ref(mic, music.copy(), sr)
@@ -176,3 +177,17 @@ def test_erle_on_pure_leak_is_high():
     out, stats = suppress_with_ref(mic, src, sr)
     assert stats["erle_db"] > 10.0
     assert _rms(out) < _rms(mic) * 0.35
+
+
+def test_double_talk_preserves_near_speech():
+    """近端人声只比串音略响时，不能整段压掉。"""
+    sr = 16_000
+    rng = np.random.default_rng(11)
+    far = rng.standard_normal(sr * 2).astype(np.float32) * 0.3
+    near = rng.standard_normal(sr * 2).astype(np.float32) * 0.4
+    delay = 200
+    leak = np.zeros_like(far)
+    leak[delay:] = far[: far.size - delay] * 0.25
+    mic = (leak + near).astype(np.float32)
+    out, _stats = suppress_with_ref(mic, far, sr)
+    assert _rms(out) > _rms(near) * 0.45

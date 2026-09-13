@@ -27,9 +27,6 @@ _N_FFT = 512
 _HOP = 256
 _SMOOTH = 0.85
 _H_MAX = 8.0
-_COH_BIN = 0.2
-_NLP_COH = 0.6
-_NLP_GAIN = 0.03
 
 
 def estimate_lag_samples(mic: np.ndarray, ref: np.ndarray, sr: int,
@@ -90,7 +87,11 @@ def align_ref(ref: np.ndarray, n: int, lag: int) -> np.ndarray:
 
 
 def _stft_cancel(mic: np.ndarray, ref: np.ndarray) -> tuple:
-    """重叠相加的平滑维纳滤波。高相干帧再压残差，避免 Whisper 捡到漏音。"""
+    """重叠相加的平滑维纳滤波，再按频点相干压残差。
+
+    整帧 NLP 和能量双讲检测都不用：前者会把近端人声打死，后者会误判导致
+    背景人声漏出去。相干高的频点是串音，压掉；不相干的是近端，留下。
+    """
     n = mic.size
     window = np.hanning(_N_FFT).astype(np.float64)
     out = np.zeros(n + _N_FFT, dtype=np.float64)
@@ -129,26 +130,17 @@ def _stft_cancel(mic: np.ndarray, ref: np.ndarray) -> tuple:
             H = np.where(over, H * (_H_MAX / (mag + 1e-12)), H)
         E = M - H * R
         coh = np.clip(np.abs(smr) ** 2 / (smm * srr + 1e-8), 0.0, 1.0)
-        E *= 1.0 - 0.9 * np.maximum(coh - _COH_BIN, 0.0) / max(1.0 - _COH_BIN, 1e-6)
+        E *= (1.0 - coh) ** 2
         total += 1
-        if ref_active:
-            thr = max(float(np.max(cur_rr)) * 0.05, 1e-10)
-            strong = cur_rr > thr
-            mean_coh = float(np.mean(coh[strong])) if np.any(strong) else 0.0
-            if mean_coh >= _NLP_COH:
-                echo = np.fft.irfft(H * R, n=_N_FFT)
-                echo_rms = float(np.sqrt(np.mean((echo * window) ** 2)))
-                near_rms = float(np.sqrt(np.mean(m_f ** 2)))
-                if near_rms <= 2.5 * echo_rms + 1e-6:
-                    E *= _NLP_GAIN
-                    echo_frames += 1
+        if ref_active and float(np.mean(coh)) >= 0.6:
+            echo_frames += 1
         e = np.fft.irfft(E, n=_N_FFT) * window
         out[start: start + _N_FFT] += e
         wsum[start: start + _N_FFT] += window ** 2
     wsum = np.maximum(wsum, 1e-8)
     y = (out / wsum)[:n].astype(np.float32)
     ratio = (echo_frames / total) if total else 0.0
-    return y, ratio
+    return y, ratio, 0.0
 
 
 def _rms(x: np.ndarray) -> float:
@@ -162,7 +154,10 @@ def suppress_with_ref(mic: np.ndarray, ref: np.ndarray,
     """对齐后频域相减。返回 (output, stats)。
     stats 含 suppressed_ratio、lag、ref_rms、erle_db，供日志诊断。
     """
-    empty = {"suppressed_ratio": 0.0, "lag": 0, "ref_rms": 0.0, "erle_db": 0.0, "gain": 0.0}
+    empty = {
+        "suppressed_ratio": 0.0, "lag": 0, "ref_rms": 0.0,
+        "erle_db": 0.0, "gain": 0.0, "dt_ratio": 0.0,
+    }
     try:
         m = np.asarray(mic, dtype=np.float32).ravel()
     except (TypeError, ValueError):
@@ -187,7 +182,7 @@ def suppress_with_ref(mic: np.ndarray, ref: np.ndarray,
     cancel_start = _time.time()
     lag = estimate_lag_samples(m, r, sr)
     aligned = align_ref(r, n, lag)
-    out, ratio = _stft_cancel(m.astype(np.float64), aligned.astype(np.float64))
+    out, ratio, dt_ratio = _stft_cancel(m.astype(np.float64), aligned.astype(np.float64))
     mic_rms = _rms(m)
     out_rms = _rms(out)
     erle = 10.0 * np.log10((mic_rms ** 2) / (out_rms ** 2 + 1e-12)) if mic_rms > 0 else 0.0
@@ -198,10 +193,11 @@ def suppress_with_ref(mic: np.ndarray, ref: np.ndarray,
         "erle_db": float(erle),
         "gain": 0.0,
         "residual_rms": out_rms,
+        "dt_ratio": dt_ratio,
     }
     logger.info(
-        "ref cancel：lag=%d (%.0fms) ref_rms=%.5f erle=%.1fdB residual_rms=%.5f nlp=%.2f elapsed=%.2fs",
-        lag, 1000.0 * lag / sr if sr else 0.0, ref_rms_all, erle, out_rms, ratio,
+        "ref cancel：lag=%d (%.0fms) ref_rms=%.5f erle=%.1fdB residual_rms=%.5f nlp=%.2f dt=%.2f elapsed=%.2fs",
+        lag, 1000.0 * lag / sr if sr else 0.0, ref_rms_all, erle, out_rms, ratio, dt_ratio,
         _time.time() - cancel_start,
     )
     return out, stats
