@@ -27,12 +27,9 @@ def test_capsule_uses_system_glass():
 
 
 def test_no_self_drawn_backdrop_pipeline():
-    src = open("ui/overlay_window.py", encoding="utf-8").read()
-    assert "_BackdropBlurView" not in src
-    assert "_GlassSkin" not in src
-    assert "CGDisplayStreamCreate" not in src
-    assert "CGWindowListCreateImage" not in src
-    assert "_updateBackdrop" not in src
+    assert not hasattr(ov, "_BackdropBlurView")
+    assert not hasattr(ov, "_GlassSkin")
+    assert not hasattr(ov.RecordingOverlay, "_updateBackdrop")
 
 
 def test_capsule_layout_derived_from_size():

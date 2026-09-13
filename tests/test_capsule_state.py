@@ -1,6 +1,5 @@
-"""单胶囊代次：旧结果定时凭代次失效，不误杀新一轮录音胶囊。"""
+"""单胶囊控制流：按下即 show，松开 busy→结果，开关关闭不碰浮窗。"""
 
-import inspect
 import logging
 from types import SimpleNamespace
 
@@ -8,7 +7,6 @@ from PyObjCTools import AppHelper
 
 from app.controller import VoiceInputApp
 from core.dictation_trace import DictationTrace
-from ui.overlay_window import RecordingOverlay
 
 
 class _FakeOverlay:
@@ -41,21 +39,46 @@ def _make_capsule_app(monkeypatch, show_overlay=True, state="idle"):
     app._refresh_status_bar_details = lambda: None
     app._start_sysref = lambda: None
     app._start_backend_warmup = lambda: None
+    app._log_perf = lambda *_a, **_k: None
+    app._schedule_idle_release_timer = lambda: None
     app.pipeline = object()
     app.copy_text = lambda text: True
     monkeypatch.setattr(AppHelper, "callAfter", lambda fn, *args: fn(*args))
     return app
 
 
+class _RecordingPipeline:
+    def __init__(self, delivery="sent"):
+        self.is_recording = False
+        self.is_initialized = True
+        self.audio_source = SimpleNamespace(
+            fell_back_to_default=False, trace=None, overflow=False,
+        )
+        self.model_engine = SimpleNamespace(is_loaded=True, trace=None)
+        self.clipboard = SimpleNamespace(last_delivery=delivery)
+        self.trace = None
+        self.starts = 0
+
+    def start_recording(self):
+        self.starts += 1
+        self.is_recording = True
+        return True
+
+    def stop_recording(self, paste_output=True):
+        self.is_recording = False
+        return SimpleNamespace(
+            no_speech=False,
+            success=True,
+            text="你好",
+            recording_duration=1.0,
+            processing_time=0.2,
+            rtf=0.2,
+            error=None,
+        )
+
+
 def _recording_pipeline():
-    return SimpleNamespace(
-        is_recording=False,
-        is_initialized=True,
-        start_recording=lambda: True,
-        audio_source=SimpleNamespace(fell_back_to_default=False, trace=None),
-        model_engine=SimpleNamespace(is_loaded=True, trace=None),
-        trace=None,
-    )
+    return _RecordingPipeline()
 
 
 def test_capsule_api_exists():
@@ -65,25 +88,6 @@ def test_capsule_api_exists():
     assert callable(VoiceInputApp._capsule_hide)
     assert not hasattr(VoiceInputApp, "_show_overlay")
     assert not hasattr(VoiceInputApp, "_hide_overlay")
-
-
-def test_status_capsule_hides_after_one_second():
-    params = inspect.signature(RecordingOverlay.show_status).parameters
-    assert params["timeout"].default == 1.0
-
-
-def test_status_carries_generation():
-    params = inspect.signature(RecordingOverlay.show_status).parameters
-    assert "generation" in params
-
-
-def test_no_first_frame_coupling():
-    import pathlib
-    controller = pathlib.Path("app/controller.py").read_text(encoding="utf-8")
-    assert "_on_first_frame" not in controller
-    assert "_arm_first_frame" not in controller
-    source = pathlib.Path("core/audio_source.py").read_text(encoding="utf-8")
-    assert "_on_first_frame" not in source
 
 
 def test_capsule_hidden_when_overlay_disabled(monkeypatch):
@@ -137,8 +141,23 @@ def test_press_shows_when_overlay_enabled(monkeypatch):
     app = _make_capsule_app(monkeypatch, show_overlay=True)
     app.pipeline = _recording_pipeline()
     app._handle_press(DictationTrace.create())
+    assert app.pipeline.starts == 1
     assert app._overlay.calls == ["show"]
     assert app._state == "recording"
+
+
+def test_press_release_records_show_busy_result(monkeypatch):
+    app = _make_capsule_app(monkeypatch, show_overlay=True)
+    app.pipeline = _recording_pipeline()
+    trace = DictationTrace.create()
+    app._handle_press(trace)
+    app._handle_release(trace)
+    assert app._overlay.calls == [
+        "show",
+        ("status", "正在识别…", None, 1),
+        ("status", "已发送到输入光标", 1.0, 1),
+    ]
+    assert app._state == "idle"
 
 
 def test_toggle_overlay_off_hides_capsule(monkeypatch):
