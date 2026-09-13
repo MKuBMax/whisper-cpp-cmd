@@ -8,11 +8,22 @@ from core.clipboard import Clipboard
 from core.model_download import ModelDownload, RECOMMENDED_MODEL
 
 
+def _stub_probe_log(monkeypatch, clipboard, snapshots):
+    calls = {"index": 0}
+
+    def fake_probe(phase):
+        calls["index"] += 1
+        snapshot = snapshots[min(calls["index"] - 1, len(snapshots) - 1)]
+        return None if snapshot is None else dict(snapshot)
+
+    monkeypatch.setattr(clipboard, "_probe_snapshot", fake_probe)
+
+
 def test_no_cursor_copies_without_sending_keys(monkeypatch):
     clipboard = Clipboard()
     copied = []
     monkeypatch.setattr(clipboard, "copy", lambda text: copied.append(text) or True)
-    monkeypatch.setattr(clipboard, "editable_target", lambda: None)
+    _stub_probe_log(monkeypatch, clipboard, [None, None])
     monkeypatch.setattr(clipboard, "_paste_with_cg_event", lambda: (_ for _ in ()).throw(AssertionError("no cursor")))
     clipboard.capture_target()
     assert not clipboard.insert("你好")
@@ -23,9 +34,15 @@ def test_no_cursor_copies_without_sending_keys(monkeypatch):
 def test_changed_focus_never_pastes_into_new_app(monkeypatch):
     clipboard = Clipboard()
     monkeypatch.setattr(clipboard, "copy", lambda text: True)
-    monkeypatch.setattr(clipboard, "editable_target", lambda: (12, "original"))
+    _stub_probe_log(
+        monkeypatch,
+        clipboard,
+        [
+            {"pid": 12, "element": "original", "frontmost_app": "a", "bundle_id": "b", "role": "AXTextArea"},
+            {"pid": 13, "element": "other", "frontmost_app": "a", "bundle_id": "b", "role": "AXTextArea"},
+        ],
+    )
     clipboard.capture_target()
-    monkeypatch.setattr(clipboard, "editable_target", lambda: (13, "other"))
     monkeypatch.setattr(clipboard, "_paste_with_cg_event", lambda: (_ for _ in ()).throw(AssertionError("focus changed")))
     assert not clipboard.insert("你好")
     assert clipboard.last_delivery == "copied"
@@ -35,7 +52,11 @@ def test_verified_cursor_gets_one_paste(monkeypatch):
     clipboard = Clipboard()
     sent = []
     monkeypatch.setattr(clipboard, "copy", lambda text: True)
-    monkeypatch.setattr(clipboard, "editable_target", lambda: (12, "original"))
+    _stub_probe_log(
+        monkeypatch,
+        clipboard,
+        [{"pid": 12, "element": "original", "frontmost_app": "a", "bundle_id": "b", "role": "AXTextArea"}],
+    )
     monkeypatch.setattr("core.clipboard.CoreFoundation.CFEqual", lambda a, b: a == b)
     monkeypatch.setattr(clipboard, "_paste_with_cg_event", lambda: sent.append(True))
     clipboard.capture_target()
