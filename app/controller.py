@@ -994,6 +994,11 @@ class VoiceInputApp:
             return
         AppHelper.callAfter(self._overlay.show_status, message, 1.0, self._capsule_generation)
 
+    def _capsule_hide(self):
+        if self._overlay is None:
+            return
+        AppHelper.callAfter(self._overlay.hide)
+
     def _refresh_status_bar_details(self):
         if self.status_bar is None:
             return
@@ -1641,22 +1646,12 @@ class VoiceInputApp:
         except Exception:
             return 0.0
 
-    def _show_overlay(self):
-        if self._overlay is None or not self.settings.show_overlay:
-            return
-        AppHelper.callAfter(self._overlay.show)
-
-    def _hide_overlay(self):
-        if self._overlay is None:
-            return
-        AppHelper.callAfter(self._overlay.hide)
-
     def toggle_overlay(self):
         self.settings.show_overlay = not self.settings.show_overlay
         self.settings.save()
         self._refresh_status_bar_details()
         if not self.settings.show_overlay:
-            self._hide_overlay()
+            self._capsule_hide()
         self._logger.info("录音浮窗切换：%s", self.settings.show_overlay)
         print(f"🪧 录音浮窗已{'开启' if self.settings.show_overlay else '关闭'}")
 

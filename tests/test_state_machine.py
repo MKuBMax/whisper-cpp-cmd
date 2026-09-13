@@ -37,8 +37,6 @@ def _make_app(initial="idle"):
     app._error_reset_timer = None
     app._cancel_error_reset_timer = lambda: None
     app._schedule_error_reset = lambda: None
-    app._show_overlay = lambda: None
-    app._hide_overlay = lambda: None
     return app
 
 
