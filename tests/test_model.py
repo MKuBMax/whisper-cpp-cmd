@@ -37,3 +37,23 @@ def test_build_server_cmd_prompt_when_set():
     cmd = b._build_server_cmd()
     assert '--prompt' in cmd
     assert '术语：Terraform' in cmd
+
+
+def test_build_server_cmd_binds_localhost():
+    cmd = _make_backend()._build_server_cmd()
+    host_index = cmd.index('--host')
+    assert cmd[host_index + 1] == '127.0.0.1'
+    assert '0.0.0.0' not in cmd
+
+
+def test_load_defaults_to_localhost_bind(tmp_path, monkeypatch):
+    cli = tmp_path / 'whisper-cli'
+    cli.write_text('')
+    (tmp_path / 'whisper-server').write_text('')
+    model = tmp_path / 'model.bin'
+    model.write_text('')
+    b = WhisperCliBackend(cli_path=str(cli), language='zh')
+    monkeypatch.setattr(b, '_start_server', lambda: None)
+    assert b.load(str(model)) is True
+    assert b._server_bind_host == '127.0.0.1'
+    assert b._server_client_host == '127.0.0.1'

@@ -976,21 +976,21 @@ class VoiceInputApp:
 
     def _capsule_show_recording(self):
         """单胶囊状态机：录音中。generation+1 让旧结果定时失效，新 show 无条件接管。"""
-        if self._overlay is None:
+        if self._overlay is None or not self.settings.show_overlay:
             return
         self._capsule_generation += 1
         AppHelper.callAfter(self._overlay.show)
 
     def _capsule_show_busy(self):
         """单胶囊状态机：识别中，常驻直到结果到达。generation 不变，仍是本次录音。"""
-        if self._overlay is None:
+        if self._overlay is None or not self.settings.show_overlay:
             return
         AppHelper.callAfter(self._overlay.show_status, "正在识别…", None, self._capsule_generation)
 
     def _capsule_show_result(self, message):
         """单胶囊状态机：结果提示 1 秒后自动熄灭。generation 快照随调用带入 overlay，
         旧结果定时到点时 generation 已变，直接丢弃，不存在误杀。"""
-        if self._overlay is None:
+        if self._overlay is None or not self.settings.show_overlay:
             return
         AppHelper.callAfter(self._overlay.show_status, message, 1.0, self._capsule_generation)
 
@@ -1798,7 +1798,7 @@ class VoiceInputApp:
         if not text:
             return False
         ok = self.copy_text(text)
-        if ok:
+        if ok and self._state not in {"recording", "processing"}:
             self._capsule_show_result("已复制到剪贴板")
         return ok
 
@@ -2454,7 +2454,7 @@ class VoiceInputApp:
         if loader is not None and loader.is_alive():
             loader.join(timeout=2.0)
         self._shutdown_sysref()
-        if self.pipeline and not (loader is not None and loader.is_alive()):
+        if self.pipeline:
             self.pipeline.shutdown()
 
         self._refresh_status_bar_details()

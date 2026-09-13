@@ -147,7 +147,7 @@ class WhisperCliBackend:
         self._model_path: Optional[str] = None
         self._server_process: Optional[subprocess.Popen] = None
         self._server_log_path: Optional[str] = None
-        self._server_bind_host = '0.0.0.0'
+        self._server_bind_host = '127.0.0.1'
         self._server_client_host = '127.0.0.1'
         self._server_port: Optional[int] = None
         self._server_start_timeout = 45.0
@@ -174,7 +174,7 @@ class WhisperCliBackend:
             return False
 
         self._model_path = model_path
-        self._server_bind_host = kwargs.get('server_host', '0.0.0.0')
+        self._server_bind_host = kwargs.get('server_host', '127.0.0.1')
         self._server_client_host = kwargs.get('server_client_host', '127.0.0.1')
         self._server_start_timeout = kwargs.get('server_start_timeout', 45.0)
         self._initial_prompt = kwargs.get('initial_prompt', '') or ''

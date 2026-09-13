@@ -28,6 +28,8 @@ def _make_app():
     app._is_running = True
     app._shutdown_lock = threading.Lock()
     app._sleep_wake_observer = None
+    app._sysref = None
+    app._sysref_lock = threading.Lock()
     app._set_state = lambda *_a, **_k: None        # 避开状态机 UI 副作用
     app._cancel_error_reset_timer = lambda: None
     app._cancel_idle_release_timer = lambda: None
@@ -37,6 +39,7 @@ def _make_app():
     app._watchdog_thread = None
     app._dictation_queue = None
     app._dictation_worker = None
+    app._model_loader_thread = None
     app.pipeline = _FakePipeline()
     app._refresh_status_bar_details = lambda: None
     return app
@@ -72,3 +75,18 @@ def test_shutdown_concurrent_lock_safe():
 
     assert app._is_running is False
     assert app.pipeline.shutdown_calls == 1   # 并发不重复清理
+
+
+class _AliveLoader:
+    def is_alive(self):
+        return True
+
+    def join(self, timeout=None):
+        return None
+
+
+def test_shutdown_stops_pipeline_while_loader_still_alive():
+    app = _make_app()
+    app._model_loader_thread = _AliveLoader()
+    app.shutdown()
+    assert app.pipeline.shutdown_calls == 1
