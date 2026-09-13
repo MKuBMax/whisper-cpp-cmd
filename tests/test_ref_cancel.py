@@ -43,7 +43,7 @@ def test_gate_suppresses_music_only():
     in_rms = float(np.sqrt(np.mean(music.astype(np.float64) ** 2)))
     out_rms = float(np.sqrt(np.mean(out.astype(np.float64) ** 2)))
     assert out_rms < in_rms * 0.5
-    assert stats["suppressed_ratio"] > 0.5
+    assert stats["erle_db"] > 6.0
 
 
 def test_gate_preserves_loud_speech_over_music():
@@ -113,7 +113,7 @@ def test_suppress_after_real_delay():
     in_rms = float(np.sqrt(np.mean(mic.astype(np.float64) ** 2)))
     out_rms = float(np.sqrt(np.mean(out.astype(np.float64) ** 2)))
     assert out_rms < in_rms * 0.5
-    assert stats["suppressed_ratio"] > 0.5
+    assert stats["erle_db"] > 6.0
 
 
 def test_long_audio_finishes_fast():
@@ -127,3 +127,52 @@ def test_long_audio_finishes_fast():
     out, _stats = suppress_with_ref(mic, ref, sr)
     assert time.time() - start < 0.5
     assert len(out) == n
+
+
+def _rms(x):
+    return float(np.sqrt(np.mean(np.asarray(x, dtype=np.float64) ** 2)))
+
+
+def test_startup_delay_500ms_is_found():
+    sr = 16_000
+    delay = 8000
+    rng = np.random.default_rng(3)
+    voice = rng.standard_normal(sr * 3).astype(np.float32) * 0.3
+    mic = np.concatenate([np.zeros(delay, dtype=np.float32), voice])[: len(voice)]
+    lag = estimate_lag_samples(mic, voice, sr, max_lag_ms=600)
+    assert abs(lag - delay) <= 16
+
+
+def test_subtracts_delayed_speech_leak():
+    sr = 16_000
+    delay = 400
+    rng = np.random.default_rng(4)
+    src = rng.standard_normal(sr * 2).astype(np.float32) * 0.4
+    mic = np.zeros_like(src)
+    mic[delay:] = src[: src.size - delay] * 0.3
+    out, stats = suppress_with_ref(mic, src, sr)
+    assert _rms(out) < _rms(mic) * 0.4
+    assert abs(stats["lag"] - delay) <= 16
+    assert stats["erle_db"] > 6.0
+
+
+def test_preserves_uncorrelated_near_speech():
+    sr = 16_000
+    rng = np.random.default_rng(5)
+    speech = rng.standard_normal(sr).astype(np.float32) * 0.4
+    ref = _sine(440.0, sr, sr, amp=0.2)
+    mic = speech + ref * 0.15
+    out, _stats = suppress_with_ref(mic, ref, sr)
+    assert _rms(out) > _rms(speech) * 0.5
+
+
+def test_erle_on_pure_leak_is_high():
+    sr = 16_000
+    rng = np.random.default_rng(9)
+    src = rng.standard_normal(sr * 2).astype(np.float32) * 0.35
+    delay = 240
+    mic = np.zeros_like(src)
+    mic[delay:] = src[: src.size - delay] * 0.2
+    out, stats = suppress_with_ref(mic, src, sr)
+    assert stats["erle_db"] > 10.0
+    assert _rms(out) < _rms(mic) * 0.35

@@ -8,6 +8,8 @@
 // Control messages: {"ready":true}, {"stopped":true}, {"error":"..."}.
 
 import AVFoundation
+import CoreAudio
+import CoreMedia
 import Foundation
 import ScreenCaptureKit
 
@@ -17,6 +19,7 @@ final class SysRefCapture: NSObject, SCStreamOutput {
     private let outHandle: FileHandle
     private let err: (String) -> Void
     private var running = true
+    private var loggedFormat = false
 
     init(outHandle: FileHandle, err: @escaping (String) -> Void) {
         self.outHandle = outHandle
@@ -90,51 +93,165 @@ final class SysRefCapture: NSObject, SCStreamOutput {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio, CMSampleBufferIsValid(sampleBuffer) else { return }
-        guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
-        var length = 0
-        var dataPointer: UnsafeMutablePointer<Int8>?
-        let status = CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length, dataPointerOut: &dataPointer)
-        guard status == kCMBlockBufferNoErr, let ptr = dataPointer, length > 0 else { return }
-        guard let format = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee else { return }
-        let bytes = Data(bytes: ptr, count: length)
-        let pcm = convertToMono16k(bytes: bytes, asbd: asbd)
+        let pcm = convertToMono16k(sampleBuffer)
         if !pcm.isEmpty {
             writeFrame(tag: 0, payload: pcm)
         }
     }
 
-    private func convertToMono16k(bytes: Data, asbd: AudioStreamBasicDescription) -> Data {
+    private func convertToMono16k(_ sampleBuffer: CMSampleBuffer) -> Data {
+        guard let format = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee else { return Data() }
+        let inRate = Int(asbd.mSampleRate.rounded())
+        guard inRate > 0 else { return Data() }
+        let channels = max(1, Int(asbd.mChannelsPerFrame))
+        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        let frameCount = Int(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frameCount > 0 else { return Data() }
+
+        // ScreenCaptureKit 把音频放在 AudioBufferList 里，CMSampleBufferGetDataBuffer
+        // 经常拿到空缓冲或未填充内存，表现为“有 samples、RMS 却接近 0”。
+        var sizeNeeded = 0
+        var probe = AudioBufferList()
+        var probeBlock: CMBlockBuffer?
+        _ = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &sizeNeeded,
+            bufferListOut: &probe,
+            bufferListSize: MemoryLayout<AudioBufferList>.size,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: 0,
+            blockBufferOut: &probeBlock
+        )
+        if sizeNeeded < MemoryLayout<AudioBufferList>.size {
+            sizeNeeded = MemoryLayout<AudioBufferList>.size + MemoryLayout<AudioBuffer>.size * max(0, channels - 1)
+        }
+
+        let rawPtr = UnsafeMutableRawPointer.allocate(byteCount: sizeNeeded, alignment: MemoryLayout<Int>.alignment)
+        defer { rawPtr.deallocate() }
+        rawPtr.initializeMemory(as: UInt8.self, repeating: 0, count: sizeNeeded)
+        let abl = rawPtr.bindMemory(to: AudioBufferList.self, capacity: 1)
+        var blockBuffer: CMBlockBuffer?
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: abl,
+            bufferListSize: sizeNeeded,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &blockBuffer
+        )
+        var mono = [Float](repeating: 0, count: frameCount)
+        if status == noErr {
+            fillMono(from: UnsafeMutableAudioBufferListPointer(abl), into: &mono, asbd: asbd)
+        } else if let fallback = fallbackMonoFromDataBuffer(sampleBuffer, asbd: asbd, frameCount: frameCount) {
+            mono = fallback
+        } else {
+            return Data()
+        }
+
+        if !loggedFormat {
+            loggedFormat = true
+            var peak: Float = 0
+            var acc: Float = 0
+            for x in mono {
+                let a = abs(x)
+                if a > peak { peak = a }
+                acc += x * x
+            }
+            let rms = sqrt(acc / Float(frameCount))
+            sendJSON([
+                "audio": [
+                    "rate": inRate,
+                    "channels": channels,
+                    "float": isFloat,
+                    "nonInterleaved": isNonInterleaved,
+                    "ablStatus": Int(status),
+                    "peak": Double(peak),
+                    "rms": Double(rms),
+                ] as [String: Any]
+            ])
+        }
+        return resampleTo16k(mono, inRate: inRate)
+    }
+
+    private func fillMono(from list: UnsafeMutableAudioBufferListPointer, into mono: inout [Float], asbd: AudioStreamBasicDescription) {
+        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        let isSignedInt = (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0
+        let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        let channels = max(1, Int(asbd.mChannelsPerFrame))
+        let bps = Int(asbd.mBitsPerChannel / 8)
+        let frameCount = mono.count
+        guard frameCount > 0, list.count > 0, let first = list[0].mData else { return }
+
+        // 参考只取第一声道，避免立体声反相抵消成静音。AEC 不需要双声道。
+        if isNonInterleaved || list.count > 1 {
+            guard isFloat, bps == 4 else { return }
+            let n0 = min(frameCount, Int(list[0].mDataByteSize) / 4)
+            let s0 = first.bindMemory(to: Float.self, capacity: n0)
+            for i in 0..<n0 { mono[i] = s0[i] }
+            return
+        }
+
+        if isFloat, bps == 4 {
+            let total = Int(list[0].mDataByteSize) / 4
+            let src = first.bindMemory(to: Float.self, capacity: total)
+            let frames = min(frameCount, total / channels)
+            for i in 0..<frames { mono[i] = src[i * channels] }
+            return
+        }
+        if isSignedInt, bps == 2 {
+            let total = Int(list[0].mDataByteSize) / 2
+            let src = first.bindMemory(to: Int16.self, capacity: total)
+            let frames = min(frameCount, total / channels)
+            for i in 0..<frames { mono[i] = Float(src[i * channels]) / 32768.0 }
+        }
+    }
+
+    private func fallbackMonoFromDataBuffer(_ sampleBuffer: CMSampleBuffer, asbd: AudioStreamBasicDescription, frameCount: Int) -> [Float]? {
+        guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return nil }
+        var length = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        let status = CMBlockBufferGetDataPointer(
+            block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length, dataPointerOut: &dataPointer
+        )
+        guard status == kCMBlockBufferNoErr, let ptr = dataPointer, length > 0 else { return nil }
         let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
         let isSignedInt = (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0
         let bps = Int(asbd.mBitsPerChannel / 8)
         let channels = max(1, Int(asbd.mChannelsPerFrame))
-        let inRate = Int(asbd.mSampleRate)
-        guard bps == 2 || bps == 4 else { return Data() }
-        let frameCount = bytes.count / (bps * channels)
-        guard frameCount > 0 else { return Data() }
-        var mono = [Float](repeating: 0, count: frameCount)
-        bytes.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            for i in 0..<frameCount {
-                var sum: Float = 0
-                for ch in 0..<channels {
-                    let off = (i * channels + ch) * bps
-                    if isFloat, bps == 4 {
-                        sum += raw.load(fromByteOffset: off, as: Float.self)
-                    } else if isSignedInt, bps == 2 {
-                        sum += Float(raw.load(fromByteOffset: off, as: Int16.self)) / 32768.0
-                    } else if isSignedInt, bps == 4 {
-                        sum += Float(raw.load(fromByteOffset: off, as: Int32.self)) / 2147483648.0
-                    }
+        guard bps == 2 || bps == 4 else { return nil }
+        let frames = min(frameCount, length / (bps * channels))
+        guard frames > 0 else { return nil }
+        var mono = [Float](repeating: 0, count: frames)
+        let raw = UnsafeRawPointer(ptr)
+        for i in 0..<frames {
+            var sum: Float = 0
+            for ch in 0..<channels {
+                let off = (i * channels + ch) * bps
+                if isFloat, bps == 4 {
+                    sum += raw.load(fromByteOffset: off, as: Float.self)
+                } else if isSignedInt, bps == 2 {
+                    sum += Float(raw.load(fromByteOffset: off, as: Int16.self)) / 32768.0
+                } else if isSignedInt, bps == 4 {
+                    sum += Float(raw.load(fromByteOffset: off, as: Int32.self)) / 2147483648.0
                 }
-                mono[i] = sum / Float(channels)
             }
+            mono[i] = sum / Float(channels)
         }
+        return mono
+    }
+
+    private func resampleTo16k(_ mono: [Float], inRate: Int) -> Data {
+        let frameCount = mono.count
+        guard frameCount > 0, inRate > 0 else { return Data() }
         if inRate == 16000 {
             return mono.withUnsafeBufferPointer { Data(buffer: $0) }
         }
-        // Integer-ratio decimation preserves energy; else linear interpolate.
-        if inRate % 16000 == 0 {
+        if inRate >= 16000, inRate % 16000 == 0 {
             let step = inRate / 16000
             var out = [Float]()
             out.reserveCapacity(frameCount / step)

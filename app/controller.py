@@ -272,6 +272,8 @@ class VoiceInputApp:
         self._logger = logging.getLogger(__name__)
         self.settings = Settings.load()
         self._sysref = None
+        self._sysref_lock = threading.Lock()
+        self._sysref_skip_segment = False
         self.pipeline: Pipeline = None
         self.listener: keyboard.Listener | None = None
         self.status_bar: StatusBarController | None = None
@@ -495,6 +497,8 @@ class VoiceInputApp:
         self.pipeline.audio_source.trace = None
         self.pipeline.model_engine.trace = None
         loaded = self.pipeline.initialize()
+        if loaded:
+            self._ensure_sysref_running()
         if not loaded:
             failed_pipeline = self.pipeline
             self.pipeline = None
@@ -1675,59 +1679,111 @@ class VoiceInputApp:
         self.settings.save()
         if self.pipeline is not None:
             self.pipeline.config.ref_cancel = self.settings.ref_cancel
+        if self.settings.ref_cancel:
+            self._ensure_sysref_running()
+        else:
+            self._shutdown_sysref()
         self._refresh_status_bar_details()
         self._logger.info("系统音频参考消除切换：%s", self.settings.ref_cancel)
         print(f"🔇 系统音频参考消除已{'开启' if self.settings.ref_cancel else '关闭'}")
 
-    def _start_sysref(self):
-        """录音开始时后台启动系统参考采集。失败静默，调用方回退 raw 链路。
-
-        不阻塞按键到录音：同步 start 要等 ready（权限弹窗时可达 8s），
-        故扔后台线程，主流程继续。参考没 ready 时 stop 返回 None 即回退。
-        耳机输出直接跳过：耳机不串音，且 ScreenCaptureKit 建流会让蓝牙音乐顿一下。"""
-        self._sysref = None
+    def _ensure_sysref_running(self):
+        """开关打开且扬声器输出时预热常驻采集。不阻塞按键。"""
         if not self.settings.ref_cancel:
             return
         try:
-            from core.sysref import SysRefCapture, default_output_device_name, is_headphone_output
+            from core.sysref import (
+                SysRefCapture,
+                default_output_device_name,
+                helper_available,
+                is_headphone_output,
+            )
             if is_headphone_output(default_output_device_name()):
-                self._logger.info("sysref 跳过：耳机输出不串音")
+                self._logger.info("sysref 未预热：耳机输出不串音")
                 return
-            cap = SysRefCapture()
-            self._sysref = cap
+            if not helper_available():
+                self._logger.info("sysref helper 不存在，跳过系统参考采集")
+                return
+            with self._sysref_lock:
+                cap = self._sysref
+                if cap is not None and cap.active:
+                    return
+                cap = SysRefCapture()
+                self._sysref = cap
             thread = threading.Thread(
                 target=self._start_sysref_async, args=(cap,), name="SysRefStart", daemon=True
             )
             thread.start()
         except Exception:
             self._logger.warning("系统参考采集启动失败，回退原声", exc_info=True)
-            self._sysref = None
+            with self._sysref_lock:
+                self._sysref = None
 
     def _start_sysref_async(self, cap):
         try:
             if not cap.start():
-                if self._sysref is cap:
-                    self._sysref = None
+                with self._sysref_lock:
+                    if self._sysref is cap:
+                        self._sysref = None
         except Exception:
             self._logger.warning("系统参考采集后台启动失败，回退原声", exc_info=True)
-            if self._sysref is cap:
-                self._sysref = None
+            with self._sysref_lock:
+                if self._sysref is cap:
+                    self._sysref = None
+
+    def _start_sysref(self):
+        """录音开始：在常驻流上切一段。耳机跳过本段，不拆流。"""
+        self._sysref_skip_segment = True
+        if not self.settings.ref_cancel:
+            return
+        try:
+            from core.sysref import default_output_device_name, is_headphone_output
+            if is_headphone_output(default_output_device_name()):
+                self._logger.info("sysref 本段跳过：耳机输出不串音")
+                return
+            with self._sysref_lock:
+                cap = self._sysref
+            if cap is None or not cap.active:
+                self._ensure_sysref_running()
+                with self._sysref_lock:
+                    cap = self._sysref
+            if cap is None or not cap.active:
+                self._logger.info("sysref 本段跳过：采集未就绪")
+                return
+            cap.begin_segment()
+            self._sysref_skip_segment = False
+        except Exception:
+            self._logger.warning("系统参考切段失败，回退原声", exc_info=True)
+            self._sysref_skip_segment = True
 
     def _stop_sysref_into_pipeline(self):
-        """录音结束时收参考 PCM 进 pipeline。失败则 ref_audio 为 None。"""
-        cap, self._sysref = self._sysref, None
+        """录音结束：切出本段 PCM。helper 继续跑。"""
         if self.pipeline is not None:
             self.pipeline.config.ref_audio = None
+        if self._sysref_skip_segment:
+            return
+        with self._sysref_lock:
+            cap = self._sysref
         if cap is None:
             return
         try:
-            ref = cap.stop()
+            ref = cap.end_segment()
         except Exception:
-            self._logger.warning("系统参考采集停止失败，回退原声", exc_info=True)
+            self._logger.warning("系统参考切段结束失败，回退原声", exc_info=True)
             return
         if ref is not None and self.pipeline is not None:
             self.pipeline.config.ref_audio = ref
             self._logger.info("系统参考音频就绪：samples=%s", len(ref))
+
+    def _shutdown_sysref(self):
+        with self._sysref_lock:
+            cap, self._sysref = self._sysref, None
+        if cap is None:
+            return
+        try:
+            cap.shutdown()
+        except Exception:
+            self._logger.warning("系统参考采集关闭失败", exc_info=True)
 
     def copy_text(self, text: str):
         if not text or self.pipeline is None:
@@ -1959,8 +2015,8 @@ class VoiceInputApp:
         )
         self._logger.info("%s 按键按下：右Command（worker 处理）", trace.prefix("press") if trace else "[press]")
         if not self.pipeline.is_recording:
+            self._start_sysref()
             if self.pipeline.start_recording():
-                self._start_sysref()
                 self._backend_released = False
                 # 单胶囊：按下即 show，不等首帧。开头 90ms 由流预热兜住。
                 self._set_state("recording")
@@ -1978,6 +2034,7 @@ class VoiceInputApp:
                 elif not self.pipeline.model_engine.is_loaded:
                     self._start_backend_warmup()
             else:
+                self._stop_sysref_into_pipeline()
                 if self.pipeline.audio_source.virtual_device_suspect:
                     self._last_result = "音频卡死，疑似虚拟声卡(向日葵等)；建议退出虚拟声卡或重启 coreaudiod"
                     print("\n❌ 录音启动失败（疑似虚拟声卡，详见日志）")
@@ -2396,6 +2453,7 @@ class VoiceInputApp:
         loader = getattr(self, "_model_loader_thread", None)
         if loader is not None and loader.is_alive():
             loader.join(timeout=2.0)
+        self._shutdown_sysref()
         if self.pipeline and not (loader is not None and loader.is_alive()):
             self.pipeline.shutdown()
 

@@ -266,23 +266,25 @@ class Pipeline:
             logger.info("开始预处理：duration=%.2fs samples=%s", duration, len(audio_data))
             if isinstance(trace, DictationTrace):
                 logger.info("%s pre_process begin duration=%.2fs samples=%s", trace.prefix("pre_process"), duration, len(audio_data))
+            if self.config.ref_cancel and self.config.ref_audio is not None:
+                try:
+                    from .ref_cancel import suppress_with_ref
+                    ref = self.config.ref_audio
+                    cleaned, stats = suppress_with_ref(audio_data, ref, self.config.audio.sample_rate)
+                    logger.info(
+                        "参考消除：lag=%s erle=%.1fdB residual_rms=%s nlp=%.2f ref_rms=%s",
+                        stats.get("lag"), float(stats.get("erle_db") or 0.0),
+                        stats.get("residual_rms"), stats.get("suppressed_ratio"),
+                        stats.get("ref_rms"),
+                    )
+                    audio_data = cleaned
+                except Exception:
+                    logger.warning("参考消除失败，回退原声", exc_info=True)
             process_start = time.time()
             processed_audio = self.processor.process(audio_data, self.config.audio.sample_rate)
             logger.info("预处理完成：elapsed=%.2fs", time.time() - process_start)
             if isinstance(trace, DictationTrace):
                 logger.info("%s pre_process done elapsed=%.2fs", trace.prefix("pre_process"), time.time() - process_start)
-            if self.config.ref_cancel and self.config.ref_audio is not None:
-                try:
-                    from .ref_cancel import suppress_with_ref
-                    ref = self.config.ref_audio
-                    cleaned, stats = suppress_with_ref(processed_audio, ref, self.config.audio.sample_rate)
-                    logger.info(
-                        "参考消除：lag=%s suppressed=%.2f",
-                        stats.get("lag"), stats.get("suppressed_ratio"),
-                    )
-                    processed_audio = cleaned
-                except Exception:
-                    logger.warning("参考消除失败，回退原声", exc_info=True)
             
             if getattr(self, "before_transcribe", None) is not None:
                 self.before_transcribe()

@@ -9,7 +9,7 @@ SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
 swiftc -o core/sysref_capture -sdk $SDK -target arm64-apple-macosx13.0 \
   core/sysref_capture.swift core/sysref_main.swift \
   -framework ScreenCaptureKit -framework AVFoundation \
-  -framework CoreMedia -framework Foundation
+  -framework CoreMedia -framework CoreAudio -framework Foundation
 ```
 
 SDK 路径随 Xcode 版本变化，用 `ls /Library/Developer/CommandLineTools/SDKs/` 找最新 MacOSX*.sdk。

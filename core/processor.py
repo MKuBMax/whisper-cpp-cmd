@@ -52,10 +52,13 @@ class Processor:
         
         return result
     
+    # 峰值过低时不拉满：参考消除后的残差若被归一化，串音会再次进入听写。
+    _MIN_PEAK_TO_NORMALIZE = 0.02
+
     def _normalize(self, audio: np.ndarray) -> np.ndarray:
         """音频归一化"""
         max_val = np.max(np.abs(audio))
-        if max_val > 0:
+        if max_val > self._MIN_PEAK_TO_NORMALIZE:
             audio = audio / max_val
         return audio.astype(np.float32)
     

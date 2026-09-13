@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-"""系统音频参考采集：经 ScreenCaptureKit 抓系统输出 PCM。
+"""系统音频参考采集：常驻 ScreenCaptureKit 子进程，录音时切一段 PCM。
 
 只抓音频不抓画面。macOS 把系统内录放在 ScreenCaptureKit 里，
 首次使用会弹屏幕录制权限，即使不录画面也一样。
 
-架构与 core/audio_worker 一致：Swift 子进程做采集，主进程只收 PCM。
-子进程源码见 core/sysref_capture.swift，构建见 core/SYSREF_BUILD.md，
-产物 core/sysref_capture（arm64，不入库）。
-协议与 audio_worker 相同：stdout 帧 [1字节tag][4字节小端len][payload]，
-tag=0 是 float32 PCM，tag=1 是 UTF-8 JSON（ready/stopped/error）。
+helper 在开关打开时预热并一直跑，避免每次按键冷启动：冷启动会有
+200ms+ 时延，而且第二次建流经常吐全零。录音只标记 begin/end 切段。
 
-线程模型：start/stop 幂等，stop 经 stdin 发 stop 并等 stopped。
-采集失败一律返回 None，调用方回退 raw 链路，不阻塞录音。
+协议：stdout 帧 [1字节tag][4字节小端len][payload]，
+tag=0 是 float32 PCM，tag=1 是 UTF-8 JSON（ready/stopped/error/audio）。
 """
 
 from __future__ import annotations
@@ -32,6 +29,9 @@ _TAG_PCM = 0
 _TAG_JSON = 1
 _READY_TIMEOUT = 8.0
 _STOP_TIMEOUT = 5.0
+_PREROLL_SAMPLES = 4_000  # 250ms @ 16kHz
+_RING_SAMPLES = 32_000    # 2s
+
 
 _HEADPHONE_MARKERS = (
     "airpods", "headphone", "headphones", "headset", "earphone",
@@ -67,9 +67,21 @@ def default_output_device_name() -> str:
         return ""
 
 
-def _helper_path() -> str:
+def _helper_candidates() -> list:
     here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(here, "sysref_capture")
+    candidates = [os.path.join(here, "sysref_capture")]
+    resource = os.environ.get("RESOURCEPATH", "")
+    if resource:
+        candidates.append(os.path.join(resource, "sysref_capture"))
+        candidates.append(os.path.join(resource, "core", "sysref_capture"))
+    return candidates
+
+
+def _helper_path() -> str:
+    for path in _helper_candidates():
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return _helper_candidates()[0]
 
 
 def helper_available() -> bool:
@@ -78,40 +90,48 @@ def helper_available() -> bool:
 
 
 class SysRefCapture:
-    """抓系统参考音频的短命采集器，随录音启停。"""
+    """常驻系统参考采集。start 一次，录音用 begin_segment/end_segment 切段。"""
 
     def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
-        self._chunks: list = []
         self._lock = threading.Lock()
         self._reader: threading.Thread | None = None
+        self._err_reader: threading.Thread | None = None
         self._ready = threading.Event()
         self._stopped = threading.Event()
         self._stop_reader = threading.Event()
         self._failed = False
+        self._ring: list = []
+        self._ring_n = 0
+        self._seg: list = []
+        self._recording = False
 
     @property
     def active(self) -> bool:
-        return self._proc is not None and self._proc.poll() is None
+        return self._proc is not None and self._proc.poll() is None and not self._failed
 
     def start(self) -> bool:
-        """启动参考采集。成功返回 True，失败返回 False（调用方回退）。"""
+        """启动常驻采集。已在跑则 True。失败 False。"""
         if self.active:
             return True
         if not helper_available():
             logger.info("sysref helper 不存在，跳过系统参考采集")
             return False
-        self._chunks = []
         self._failed = False
         self._ready.clear()
         self._stopped.clear()
         self._stop_reader.clear()
+        with self._lock:
+            self._ring = []
+            self._ring_n = 0
+            self._seg = []
+            self._recording = False
         try:
             self._proc = subprocess.Popen(
                 [_helper_path(), "--sysref"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 bufsize=0,
             )
         except Exception as e:
@@ -122,21 +142,59 @@ class SysRefCapture:
             target=self._reader_loop, name="SysRefReader", daemon=True
         )
         self._reader.start()
+        self._err_reader = threading.Thread(
+            target=self._stderr_loop, name="SysRefStderr", daemon=True
+        )
+        self._err_reader.start()
         ok = self._ready.wait(timeout=_READY_TIMEOUT)
-        if not ok or self._failed:
+        if not ok or self._failed or not self.active:
             logger.warning("sysref ready 超时或子进程报错（可能被权限弹窗挡住或无系统音频）")
-            self.stop()
+            self.shutdown()
             return False
-        logger.info("sysref 参考采集已启动")
+        logger.info("sysref 常驻参考采集已启动")
         return True
 
-    def stop(self) -> np.ndarray | None:
-        """停止采集并返回参考 PCM（16kHz float32），失败返回 None。"""
-        proc, reader = self._proc, self._reader
+    def begin_segment(self) -> None:
+        """录音开始：带 250ms 预滚，后续 PCM 记入本段。"""
+        with self._lock:
+            preroll = self._ring_concat_locked()
+            if preroll.size > _PREROLL_SAMPLES:
+                preroll = preroll[-_PREROLL_SAMPLES:]
+            self._seg = [preroll] if preroll.size else []
+            self._recording = True
+
+    def end_segment(self) -> np.ndarray | None:
+        """录音结束：返回本段 PCM，采集进程继续跑。"""
+        with self._lock:
+            self._recording = False
+            chunks = list(self._seg)
+            self._seg = []
+        if not chunks:
+            logger.info("sysref 本段无参考音频，回退原声")
+            return None
+        try:
+            out = np.concatenate(chunks, axis=0).astype(np.float32)
+        except Exception as e:
+            logger.warning("sysref 拼接失败：%s", e)
+            return None
+        rms = float(np.sqrt(np.mean(out.astype(np.float64) ** 2))) if out.size else 0.0
+        logger.info("sysref 本段就绪：samples=%s rms=%.5f", int(out.size), rms)
+        if out.size == 0:
+            return None
+        return out
+
+    def shutdown(self) -> None:
+        """结束 helper。应用退出或关闭开关时调用。"""
+        proc, reader, err_reader = self._proc, self._reader, self._err_reader
         self._proc = None
         self._reader = None
+        self._err_reader = None
+        with self._lock:
+            self._recording = False
+            self._seg = []
         if proc is None:
-            return None
+            self._stop_reader.set()
+            return
         try:
             if proc.poll() is None and proc.stdin is not None:
                 proc.stdin.write(b"stop\n")
@@ -153,16 +211,27 @@ class SysRefCapture:
         self._stop_reader.set()
         if reader is not None:
             reader.join(timeout=2.0)
-        with self._lock:
-            chunks = list(self._chunks)
-        if not chunks:
-            logger.info("sysref 无参考音频（系统静音或权限未给），回退原声")
-            return None
+        if err_reader is not None:
+            err_reader.join(timeout=1.0)
+        logger.info("sysref 常驻采集已停止")
+
+    def _ring_concat_locked(self) -> np.ndarray:
+        if not self._ring:
+            return np.zeros(0, dtype=np.float32)
         try:
-            return np.concatenate(chunks, axis=0).astype(np.float32)
-        except Exception as e:
-            logger.warning("sysref 拼接失败：%s", e)
-            return None
+            return np.concatenate(self._ring, axis=0).astype(np.float32)
+        except Exception:
+            return np.zeros(0, dtype=np.float32)
+
+    def _push_pcm(self, arr: np.ndarray) -> None:
+        with self._lock:
+            self._ring.append(arr)
+            self._ring_n += int(arr.size)
+            while self._ring_n > _RING_SAMPLES and len(self._ring) > 1:
+                old = self._ring.pop(0)
+                self._ring_n -= int(old.size)
+            if self._recording:
+                self._seg.append(arr)
 
     def _reader_loop(self) -> None:
         proc = self._proc
@@ -198,6 +267,21 @@ class SysRefCapture:
             buf.extend(chunk)
         return bytes(buf)
 
+    def _stderr_loop(self) -> None:
+        proc = self._proc
+        if proc is None or proc.stderr is None:
+            return
+        try:
+            while not self._stop_reader.is_set():
+                line = proc.stderr.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").strip()
+                if text:
+                    logger.info("sysref helper：%s", text)
+        except Exception:
+            logger.debug("sysref stderr 退出", exc_info=True)
+
     def _handle_frame(self, tag: int, payload: bytes) -> None:
         if tag == _TAG_PCM:
             try:
@@ -206,8 +290,7 @@ class SysRefCapture:
                 return
             if arr.size == 0:
                 return
-            with self._lock:
-                self._chunks.append(arr.copy())
+            self._push_pcm(arr.copy())
             return
         try:
             obj = json.loads(payload.decode("utf-8"))
@@ -217,6 +300,8 @@ class SysRefCapture:
             self._ready.set()
         elif "stopped" in obj:
             self._stopped.set()
+        elif "audio" in obj:
+            logger.info("sysref 首帧：%s", obj.get("audio"))
         elif "error" in obj:
             logger.warning("sysref 子进程错误：%s", obj.get("error"))
             self._failed = True
