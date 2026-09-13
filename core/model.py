@@ -27,6 +27,61 @@ logger = logging.getLogger(__name__)
 _SILERO_VAD_MODEL_URL = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin"
 _DEFAULT_VAD_MODEL_NAME = "ggml-silero-v6.2.0.bin"
 
+# verbose 门限：全部段同时满足才判无语音。阈值保守，先观察日志再收紧。
+NO_SPEECH_PROB_THRESHOLD = 0.7
+AVG_LOGPROB_THRESHOLD = -0.5
+
+
+def filter_hallucination(result: dict) -> dict:
+    """Apply the verbose gate to a whisper-server verbose_json payload.
+
+    Never invent speech: missing segments pass through untouched.
+    Only when every segment looks like non-speech is the text dropped.
+    Returns {"text": str, "no_speech": bool, "worst_no_speech_prob": float|None,
+    "worst_avg_logprob": float|None}.
+    """
+    text = str((result or {}).get("text") or "").strip()
+    segments = (result or {}).get("segments") or []
+    if not text or not segments:
+        return {
+            "text": text,
+            "no_speech": False,
+            "worst_no_speech_prob": None,
+            "worst_avg_logprob": None,
+        }
+    worst_no_speech_prob = None
+    worst_avg_logprob = None
+    all_non_speech = True
+    for segment in segments:
+        try:
+            no_speech_prob = float(segment.get("no_speech_prob"))
+            avg_logprob = float(segment.get("avg_logprob"))
+        except (TypeError, ValueError):
+            all_non_speech = False
+            break
+        if worst_no_speech_prob is None or no_speech_prob > worst_no_speech_prob:
+            worst_no_speech_prob = no_speech_prob
+        if worst_avg_logprob is None or avg_logprob < worst_avg_logprob:
+            worst_avg_logprob = avg_logprob
+        if not (
+            no_speech_prob >= NO_SPEECH_PROB_THRESHOLD
+            and avg_logprob <= AVG_LOGPROB_THRESHOLD
+        ):
+            all_non_speech = False
+    if all_non_speech:
+        return {
+            "text": "",
+            "no_speech": True,
+            "worst_no_speech_prob": worst_no_speech_prob,
+            "worst_avg_logprob": worst_avg_logprob,
+        }
+    return {
+        "text": text,
+        "no_speech": False,
+        "worst_no_speech_prob": worst_no_speech_prob,
+        "worst_avg_logprob": worst_avg_logprob,
+    }
+
 
 @dataclass
 class TranscriptionResult:
@@ -398,7 +453,7 @@ class WhisperCliBackend:
         
         body = bytearray()
         body.extend(self._multipart_field(boundary, 'file', os.path.basename(audio_path), mime_type, audio_bytes))
-        body.extend(self._multipart_field(boundary, 'response_format', None, 'text/plain', b'json'))
+        body.extend(self._multipart_field(boundary, 'response_format', None, 'text/plain', b'verbose_json'))
         body.extend(f'--{boundary}--\r\n'.encode('utf-8'))
         
         try:
@@ -439,7 +494,7 @@ class WhisperCliBackend:
             data = json.loads(payload)
         except json.JSONDecodeError:
             return payload.strip()
-        
+
         if isinstance(data, dict):
             if data.get('error'):
                 self._health_error = str(data['error'])
@@ -447,8 +502,17 @@ class WhisperCliBackend:
                 return f"错误：{data['error']}"
             if data.get('text') is not None:
                 self._health_error = ""
-                text = str(data['text']).strip()
-                logger.info("whisper-server 转录完成：text_len=%s", len(text))
+                gated = filter_hallucination(data)
+                text = str(gated["text"]).strip()
+                logger.info(
+                    "whisper-server 转录完成：text_len=%s no_speech_prob=%s avg_logprob=%s gated=%s",
+                    len(text),
+                    gated["worst_no_speech_prob"],
+                    gated["worst_avg_logprob"],
+                    gated["no_speech"],
+                )
+                if gated["no_speech"]:
+                    return ""
                 return text
 
         self._health_error = ""
