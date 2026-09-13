@@ -290,7 +290,6 @@ class VoiceInputApp:
         self._idle_release_deadline: float | None = None
         self._backend_released = False
         self._pipeline_transitioning = False
-        self._live_dictation = None
         self._backend_warmup_thread: threading.Thread | None = None
         self._backend_warmup_lock = threading.Lock()
         self._current_trace: DictationTrace | None = None
@@ -383,7 +382,6 @@ class VoiceInputApp:
         }
         print(f"识别语言：{language_labels.get(self.settings.language, self.settings.language)}")
         print(f"中文脚本：{self.settings.chinese_script}")
-        print(f"听写模式：{'预览模式' if self.settings.dictation_mode == 'preview' else '快速模式'}")
         print(f"录音采样率：{self.settings.sample_rate}Hz")
         print("后端：whisper-cli")
         if pipeline_status:
@@ -491,7 +489,6 @@ class VoiceInputApp:
         pipeline_config.ref_cancel = self.settings.ref_cancel
 
         self.pipeline = Pipeline(pipeline_config)
-        self._live_dictation = None
         self.pipeline.before_transcribe = self._wait_for_backend_warmup
         self.pipeline.trace = None
         self.pipeline.audio_source.trace = None
@@ -819,14 +816,6 @@ class VoiceInputApp:
                         self.pipeline.model_engine.is_loaded if self.pipeline else None,
                         self.pipeline.is_recording if self.pipeline else None,
                     )
-                    if (
-                        self.settings.dictation_mode == "preview"
-                        and self._live_dictation is not None
-                        and self.pipeline is not None
-                        and self.pipeline.is_recording
-                        and self.pipeline.model_engine.is_loaded
-                    ):
-                        self._live_dictation.start()
                 finally:
                     with self._backend_warmup_lock:
                         if self._backend_warmup_thread is threading.current_thread():
@@ -864,8 +853,6 @@ class VoiceInputApp:
         self._cancel_error_reset_timer()
         self._cancel_idle_release_timer()
 
-        if self._live_dictation is not None:
-            self._live_dictation.stop()
         if self.pipeline:
             self.pipeline.shutdown()
             self.pipeline = None
@@ -941,16 +928,6 @@ class VoiceInputApp:
         }
         return [
             {"title": label, "value": code, "selected": code == self.settings.chinese_script}
-            for code, label in labels.items()
-        ]
-
-    def _get_dictation_mode_options(self):
-        labels = {
-            "preview": "预览模式",
-            "quick": "快速模式",
-        }
-        return [
-            {"title": label, "value": code, "selected": code == self.settings.dictation_mode}
             for code, label in labels.items()
         ]
 
@@ -1034,7 +1011,6 @@ class VoiceInputApp:
         if hasattr(self.status_bar, "setRefCancel_"):
             AppHelper.callAfter(self.status_bar.setRefCancel_, self.settings.ref_cancel)
         AppHelper.callAfter(self.status_bar.setChineseScriptOptions_, self._get_chinese_script_options())
-        AppHelper.callAfter(self.status_bar.setDictationModeOptions_, self._get_dictation_mode_options())
 
     def _refresh_status_bar_dynamic_details(self):
         if self.status_bar is None:
@@ -1888,27 +1864,9 @@ class VoiceInputApp:
         self.settings.save()
         if self.pipeline is not None:
             self.pipeline.config.output.chinese_script = script
-        if self._live_dictation is not None:
-            self._live_dictation.config.chinese_script = script
         self._logger.info("切换中文脚本：%s", script)
         self._refresh_status_bar_details()
         print(f"🈶 已切换中文脚本：{script}")
-
-    def select_dictation_mode(self, mode: str):
-        if mode == self.settings.dictation_mode:
-            return
-        if mode not in {"preview", "quick"}:
-            self._logger.warning("忽略未知听写模式：%s", mode)
-            return
-        if self.pipeline is not None and self.pipeline.is_recording:
-            print("❌ 录音中无法切换听写模式")
-            return
-
-        self.settings.dictation_mode = mode
-        self.settings.save()
-        self._logger.info("切换听写模式：%s", mode)
-        self._refresh_status_bar_details()
-        print(f"🎚️ 已切换听写模式：{'预览模式' if mode == 'preview' else '快速模式'}")
 
     def _get_hotkey_options(self):
         return [
@@ -1995,18 +1953,14 @@ class VoiceInputApp:
         self.pipeline.trace = trace
         self.pipeline.audio_source.trace = trace
         self.pipeline.model_engine.trace = trace
-        if self._live_dictation is not None:
-            self._live_dictation.trace = trace
         self._logger.info(
-            "%s 按键按下上下文：paused=%s state=%s recording=%s pipeline_init=%s backend_released=%s live_dictation=%s dictation_mode=%s",
+            "%s 按键按下上下文：paused=%s state=%s recording=%s pipeline_init=%s backend_released=%s",
             trace.prefix("press") if trace else "[press]",
             self._paused,
             self._state,
             self.pipeline.is_recording if self.pipeline else None,
             self.pipeline.is_initialized if self.pipeline else None,
             self._backend_released,
-            self._live_dictation is not None,
-            self.settings.dictation_mode,
         )
         self._logger.info("%s 按键按下：右Command（worker 处理）", trace.prefix("press") if trace else "[press]")
         if not self.pipeline.is_recording:
@@ -2021,12 +1975,7 @@ class VoiceInputApp:
                 if self.pipeline.audio_source.fell_back_to_default:
                     print("   ⚠️ 指定麦克风不可用，已回退到系统默认设备")
                 self._logger.info("%s 录音开始成功", trace.prefix("recording_start") if trace else "[recording_start]")
-                if self.settings.dictation_mode == "preview" and self._live_dictation is not None:
-                    if self.pipeline.model_engine.is_loaded:
-                        self._live_dictation.start()
-                    else:
-                        self._start_backend_warmup()
-                elif not self.pipeline.model_engine.is_loaded:
+                if not self.pipeline.model_engine.is_loaded:
                     self._start_backend_warmup()
             else:
                 self._stop_sysref_into_pipeline()
@@ -2046,21 +1995,17 @@ class VoiceInputApp:
             self._current_trace = None
             return
         self._logger.info(
-            "%s 按键释放上下文：paused=%s state=%s recording=%s pipeline_init=%s backend_released=%s live_dictation=%s dictation_mode=%s",
+            "%s 按键释放上下文：paused=%s state=%s recording=%s pipeline_init=%s backend_released=%s",
             trace.prefix("release") if trace else "[release]",
             self._paused,
             self._state,
             self.pipeline.is_recording if self.pipeline else None,
             self.pipeline.is_initialized if self.pipeline else None,
             self._backend_released,
-            self._live_dictation is not None,
-            self.settings.dictation_mode,
         )
         self._logger.info("%s 按键释放：右Command（worker 处理）", trace.prefix("release") if trace else "[release]")
         if self.pipeline.is_recording:
             self._logger.info("%s 已停止采集，识别前确认后台就绪", trace.prefix("release") if trace else "[release]")
-            if self.settings.dictation_mode == "preview" and self._live_dictation is not None:
-                self._live_dictation.stop()
             self._set_state("processing")
             self._capsule_show_busy()
             print("⏳ 转录中...")
@@ -2068,11 +2013,7 @@ class VoiceInputApp:
 
             try:
                 self._stop_sysref_into_pipeline()
-                # Live preview was removed from the default product flow. Keep
-                # legacy preview configs safe by delivering the final result
-                # once on release instead of silently dropping the text.
-                paste_output = True
-                result = self.pipeline.stop_recording(paste_output=paste_output)
+                result = self.pipeline.stop_recording(paste_output=True)
             except Exception as e:
                 self._logger.exception("stop_recording 异常")
                 self._capsule_show_result("识别未完成，请重试")
@@ -2095,9 +2036,6 @@ class VoiceInputApp:
             overflow = self.pipeline.audio_source.overflow
             if result.success:
                 no_speech = bool(getattr(result, "no_speech", False))
-                if self.settings.dictation_mode == "preview" and self._live_dictation is not None:
-                    # 预览收尾使用与 quick 模式相同的最终识别文本。
-                    self._live_dictation.finalize(result.text)
                 self._logger.info(
                     "%s stop_recording 完成：no_speech=%s recording_duration=%.2fs processing_time=%.2fs rtf=%.2fx text_len=%s",
                     trace.prefix("stop_recording") if trace else "[stop_recording]",
@@ -2141,8 +2079,6 @@ class VoiceInputApp:
             self.pipeline.trace = None
             self.pipeline.audio_source.trace = None
             self.pipeline.model_engine.trace = None
-        if self._live_dictation is not None:
-            self._live_dictation.trace = None
 
     def export_diagnostic_report(self, reason: str = "manual"):
         """导出诊断报告（手动触发，主线程执行，worker 卡死时也能跑）。"""
@@ -2180,12 +2116,6 @@ class VoiceInputApp:
     def reload_model(self):
         self.load_model_async(self.settings.current_model, force=True)
 
-    def _first_char_ms(self):
-        """预览模式下首字延迟（ms）；非预览/未产生返回 None。"""
-        if self._live_dictation is None:
-            return None
-        return self._live_dictation.first_char_latency_ms
-
     def _log_perf(self, result, trace):
         """把本次听写的性能数据追加到 perf.jsonl（延迟/RTF 度量基线）。"""
         try:
@@ -2201,7 +2131,7 @@ class VoiceInputApp:
                 "rtf": round(result.rtf, 3),
                 "text_len": len(result.text or ""),
                 "no_speech": bool(getattr(result, "no_speech", False)),
-                "first_char_ms": self._first_char_ms(),
+                "first_char_ms": None,
                 "success": result.success,
             }
             append_perf_log(self._perf_log_path, record)
@@ -2423,9 +2353,6 @@ class VoiceInputApp:
         self._set_state("idle")
         self._cancel_error_reset_timer()
         self._cancel_idle_release_timer()
-
-        if self._live_dictation is not None:
-            self._live_dictation.stop()
 
         if self.listener:
             self.listener.stop()

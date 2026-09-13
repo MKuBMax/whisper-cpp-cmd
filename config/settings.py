@@ -166,7 +166,7 @@ class Settings:
             if isinstance(self.dictation_mode, str)
             else "quick"
         )
-        if self.dictation_mode not in {"preview", "quick"}:
+        if self.dictation_mode != "quick":
             self.dictation_mode = "quick"
 
         for name, default in (

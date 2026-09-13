@@ -21,7 +21,6 @@ WhisperCppCmd 是一个 macOS 本地语音输入菜单栏 App，使用 Python + 
 - core/pipeline.py、core/model.py：转写管线和模型进程。
 - core/audio_source.py、core/audio_worker.py：采集客户端和隔离的音频 worker。
 - core/clipboard.py：剪贴板与文本插入。
-- core/live_dictation.py：实时预览。
 - core/output.py：输出格式化、历史记录和日志。
 - core/audio_quality.py：VAD 之外的数字静音/无效采样检查。
 - core/stats.py、core/update_checker.py：统计汇总和 GitHub Release 更新检查。

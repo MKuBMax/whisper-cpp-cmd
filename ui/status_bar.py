@@ -41,8 +41,6 @@ class StatusBarController(NSObject):
         self.language_submenu = None
         self.chinese_script_menu_item = None
         self.chinese_script_submenu = None
-        self.dictation_mode_menu_item = None
-        self.dictation_mode_submenu = None
         self.hotkey_menu_item = None
         self.hotkey_submenu = None
         self.accessibility_permission_item = None
@@ -288,12 +286,6 @@ class StatusBarController(NSObject):
             return
         self._replace_radio_menu(self.chinese_script_submenu, script_payload, "selectChineseScript:")
         self._update_current_value_title(self.chinese_script_menu_item, script_payload, "中文脚本")
-
-    def setDictationModeOptions_(self, mode_payload):
-        if self.dictation_mode_submenu is None:
-            return
-        self._replace_radio_menu(self.dictation_mode_submenu, mode_payload, "selectDictationMode:")
-        self._update_current_value_title(self.dictation_mode_menu_item, mode_payload, "听写模式")
 
     def setHotkeyOptions_(self, hotkey_payload):
         if self.hotkey_submenu is None:
@@ -607,9 +599,6 @@ class StatusBarController(NSObject):
 
     def selectChineseScript_(self, sender):
         self.app.select_chinese_script(str(sender.representedObject()))
-
-    def selectDictationMode_(self, sender):
-        self.app.select_dictation_mode(str(sender.representedObject()))
 
     def selectHotkey_(self, sender):
         self.app.select_hotkey(str(sender.representedObject()))

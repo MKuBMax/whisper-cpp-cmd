@@ -12,7 +12,7 @@ AudioUnit（closed=False）拖垮同进程后续所有 Pa_OpenStream——整个
 判定 worker 卡死，_try_respawn 杀旧起新（限流防风暴）。respawn 统一在调用线程
 （_send_cmd）触发，reader 只标记 _worker_dead，避免 reader 线程调 respawn 的死锁。
 
-对外接口与历史单进程版本完全一致（pipeline/controller/live_dictation/diagnostics
+对外接口与历史单进程版本完全一致（pipeline/controller/diagnostics
 无感）。本类职责：spawn/管理 worker 子进程、收 PCM 入本地 buffer、发命令等 ack、
 健康检测 + respawn。
 """

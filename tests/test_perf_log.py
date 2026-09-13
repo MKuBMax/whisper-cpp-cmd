@@ -59,10 +59,8 @@ def _make_app():
     from config.settings import Settings
     app = VoiceInputApp.__new__(VoiceInputApp)
     app.settings = Settings()
-    app.settings.dictation_mode = "preview"
     app.settings.use_vad = True
     app._logger = logging.getLogger("test")
-    app._live_dictation = None
     app._perf_log_path = "/tmp/test_perf.jsonl"
     return app
 
@@ -76,13 +74,13 @@ def test_log_perf_builds_full_record(monkeypatch):
     rec = captured[0]
     assert rec["trace_id"] == "abc12345"
     assert rec["model"] == app.settings.current_model
-    assert rec["mode"] == "preview"
+    assert rec["mode"] == "quick"
     assert rec["use_vad"] is True
     assert rec["duration_s"] == 2.5
     assert rec["processing_s"] == 1.0
     assert rec["rtf"] == 0.4
     assert rec["text_len"] == 2
-    assert rec["first_char_ms"] is None  # _live_dictation 为 None
+    assert rec["first_char_ms"] is None
     assert rec["success"] is True
     assert "ts" in rec
 

@@ -82,6 +82,13 @@ def test_malformed_experience_version_still_uses_safe_defaults(tmp_path):
     assert settings.dictation_mode == "quick"
 
 
+def test_preview_mode_migrates_even_after_experience_version(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"experience_version":1,"dictation_mode":"preview"}')
+    settings = Settings.load(str(path))
+    assert settings.dictation_mode == "quick"
+
+
 def test_vad_and_partial_downloads_are_not_speech_models(tmp_path):
     for name in ("ggml-silero-v6.2.0.bin", "ggml-large.bin.part", "ggml-small.bin"):
         (tmp_path / name).write_bytes(b"model")

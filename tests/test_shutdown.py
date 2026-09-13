@@ -33,7 +33,6 @@ def _make_app():
     app._set_state = lambda *_a, **_k: None        # 避开状态机 UI 副作用
     app._cancel_error_reset_timer = lambda: None
     app._cancel_idle_release_timer = lambda: None
-    app._live_dictation = None
     app.listener = None
     app._watchdog_stop = threading.Event()
     app._watchdog_thread = None

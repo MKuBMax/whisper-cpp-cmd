@@ -36,7 +36,6 @@ def _make_capsule_app(monkeypatch, show_overlay=True, state="idle"):
     app._logger = logging.getLogger("test_capsule_state")
     app._current_trace = None
     app.status_bar = None
-    app._live_dictation = None
     app._backend_released = False
     app._cancel_error_reset_timer = lambda: None
     app._refresh_status_bar_details = lambda: None
