@@ -6,7 +6,7 @@
 
 ## 当前方案
 
-使用一个约 1 秒重复触发的 NSTimer，target 是 NSObject，selector 只做空操作。这个 timer 让主线程定期回到 Python，SIGINT/SIGTERM/SIGHUP 就能及时进入 graceful shutdown。
+使用一个约 1 秒重复触发的 NSTimer，target 是 NSObject，selector 只更新主线程心跳。这个 timer 让主线程定期回到 Python，SIGINT/SIGTERM/SIGHUP 就能及时进入 graceful shutdown。权限检查不放在这个 tick 里：每秒静默检查会把未就绪的热键 event tap 反复拆再建。授权后的恢复走菜单打开、主窗口显示、以及 `applicationDidBecomeActive_`。
 
 注意：
 

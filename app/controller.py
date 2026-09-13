@@ -223,14 +223,12 @@ class _SignalPump(NSObject):
     """
 
     def tick_(self, _sender):
-        # 更新主线程心跳，供 watchdog 检测 runloop 冻结（主线程卡在同步 C 调用时 NSTimer 不 fire → 心跳停滞）
+        # 只写心跳。主线程卡在同步 C 调用时 NSTimer 不 fire，watchdog 靠心跳停滞判断。
+        # 权限刷新不放这里：每秒检查会把未就绪的 event tap 反复拆再建。
         app = getattr(self, "_app_ref", None)
         if app is not None:
             try:
                 app._main_thread_heartbeat = time.monotonic()
-                # 用户可能在启动时打开的系统设置里刚刚完成授权。定时静默检查
-                # 可以让菜单状态和全局热键监听在授权后自动恢复，无需再重启 App。
-                app.refresh_accessibility_permission_status()
             except Exception:
                 pass  # tick_ 是诊断辅助，异常不应影响 runloop
 
@@ -250,6 +248,12 @@ class _AppDelegate(NSObject):
         if app is not None and getattr(app, "status_bar", None) is not None:
             return app.status_bar.status_menu
         return None
+
+    def applicationDidBecomeActive_(self, notification):
+        """从系统设置回到 App 时静默刷新权限，不走每秒泵。"""
+        app = getattr(self, "_app_ref", None)
+        if app is not None and getattr(app, "_is_running", False):
+            app.refresh_accessibility_permission_status()
 
     def applicationShouldHandleReopen_hasVisibleWindows_(self, sender, flag):
         """用户点击 Dock 图标时，唤起控制中心或向导窗口。"""

@@ -147,6 +147,30 @@ def test_input_monitoring_prompt_does_not_call_blocking_hid_api(monkeypatch):
     assert called == []
 
 
+def test_signal_pump_tick_only_updates_heartbeat():
+    pump = controller._SignalPump.alloc().init()
+    refreshed = []
+    app = types.SimpleNamespace(
+        _main_thread_heartbeat=0.0,
+        refresh_accessibility_permission_status=lambda: refreshed.append(True),
+    )
+    pump._app_ref = app
+    pump.tick_(None)
+    assert app._main_thread_heartbeat > 0.0
+    assert refreshed == []
+
+
+def test_become_active_refreshes_permissions():
+    delegate = controller._AppDelegate.alloc().init()
+    refreshed = []
+    delegate._app_ref = types.SimpleNamespace(
+        _is_running=True,
+        refresh_accessibility_permission_status=lambda: refreshed.append(True),
+    )
+    delegate.applicationDidBecomeActive_(None)
+    assert refreshed == [True]
+
+
 def test_permission_transition_restarts_listener(monkeypatch):
     """授权发生在 App 已运行后，旧的未受信任 event tap 必须重建。"""
     app = VoiceInputApp.__new__(VoiceInputApp)
