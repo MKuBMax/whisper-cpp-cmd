@@ -125,12 +125,14 @@ def _new_keyboard_listener(**callbacks):
 from config.settings import Settings
 from config.paths import (
     app_executable,
+    audio_archive_dir,
     is_standalone_bundle,
     logs_dir,
     runtime_root,
     update_helper_path,
 )
 from config.version import APP_VERSION, UPDATE_REPOSITORY
+from core.audio_archive import AudioArchive
 from core.dictation_trace import DictationTrace
 from core.pipeline import Pipeline, PipelineConfig, AudioConfig
 from core.perf_log import append_perf_log
@@ -149,6 +151,7 @@ from ui.status_bar import StatusBarController
 from ui.overlay_window import RecordingOverlay
 from ui.settings_window import SettingsWindowController
 from ui.dashboard_window import DashboardWindowController
+from ui.audio_recording_window import AudioRecordingWindowController
 from core.model_download import ModelDownload, RECOMMENDED_MODEL
 from ui.stats_window import StatsWindowController
 from ui.onboarding_window import OnboardingWindowController
@@ -275,6 +278,7 @@ class VoiceInputApp:
     def __init__(self):
         self._logger = logging.getLogger(__name__)
         self.settings = Settings.load()
+        self.audio_archive = AudioArchive()
         self._sysref = None
         self._sysref_lock = threading.Lock()
         self._sysref_skip_segment = False
@@ -322,6 +326,7 @@ class VoiceInputApp:
         self._settings_window: SettingsWindowController | None = None
         self._dashboard_window: DashboardWindowController | None = None
         self._stats_window: StatsWindowController | None = None
+        self._audio_recording_window: AudioRecordingWindowController | None = None
         self._onboarding_window: OnboardingWindowController | None = None
         self._update_thread: threading.Thread | None = None
         self._perf_log_path = os.path.join(
@@ -493,6 +498,7 @@ class VoiceInputApp:
         pipeline_config.ref_cancel = self.settings.ref_cancel
 
         self.pipeline = Pipeline(pipeline_config)
+        self.pipeline.audio_archive = self.audio_archive
         self.pipeline.before_transcribe = self._wait_for_backend_warmup
         self.pipeline.fetch_ref_audio = self._end_sysref_segment
         self.pipeline.trace = None
@@ -626,6 +632,15 @@ class VoiceInputApp:
         if self._stats_window is None:
             self._stats_window = StatsWindowController.alloc().initWithApp_(self)
         self._stats_window.show()
+
+    def get_recent_audio_records(self) -> list[dict]:
+        return self.audio_archive.list_recent()
+
+    def show_audio_recording(self, recording_id: str) -> None:
+        record = self.audio_archive.get_recording(recording_id)
+        if self._audio_recording_window is None:
+            self._audio_recording_window = AudioRecordingWindowController.alloc().initWithApp_(self)
+        self._audio_recording_window.show_recording(record)
 
     def open_onboarding(self) -> None:
         self.open_dashboard()
@@ -2110,6 +2125,18 @@ class VoiceInputApp:
         except Exception as e:
             self._logger.warning("打开模型文件夹失败：%s", e)
             print(f"❌ 打开模型文件夹失败：{e}")
+
+    def open_audio_archive_folder(self):
+        """在 Finder 中打开最近识别音频的本地归档目录。"""
+        path = audio_archive_dir()
+        try:
+            os.makedirs(path, mode=0o700, exist_ok=True)
+            os.chmod(path, 0o700)
+            subprocess.run(["open", path], check=False)
+            self._logger.info("打开最近语音记录目录：%s", path)
+        except Exception as e:
+            self._logger.warning("打开最近语音记录目录失败：%s", e)
+            print(f"❌ 打开最近语音记录目录失败：{e}")
 
     def open_model_download_page(self):
         """打开浏览器跳转到模型下载页。"""

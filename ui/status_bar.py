@@ -4,6 +4,7 @@
 """
 
 import os
+from datetime import datetime
 
 import objc
 import AppKit
@@ -67,6 +68,8 @@ class StatusBarController(NSObject):
         self.copy_last_result_item = None
         self.history_menu_item = None
         self.history_submenu = None
+        self.audio_archive_item = None
+        self.audio_archive_submenu = None
         self.settings_item = None
         self.stats_item = None
         self.update_item = None
@@ -128,6 +131,11 @@ class StatusBarController(NSObject):
         self.status_menu.addItem_(AppKit.NSMenuItem.separatorItem())
         item(self.status_menu, "update_item", "检查更新…", "checkForUpdates:")
         item(self.status_menu, "export_diagnostic_item", "导出诊断报告…", "exportDiagnostic:")
+        archive_item = item(self.status_menu, "audio_archive_item", "最近语音记录")
+        archive_item.setEnabled_(True)
+        self.audio_archive_submenu = AppKit.NSMenu.alloc().init()
+        self.audio_archive_submenu.setDelegate_(self)
+        archive_item.setSubmenu_(self.audio_archive_submenu)
         item(self.status_menu, "quit_item", "退出 WhisperCppCmd", "quitApp:", "q")
         self.status_item.setMenu_(self.status_menu)
         if hasattr(self.status_item, "setLength_"):
@@ -440,6 +448,53 @@ class StatusBarController(NSObject):
             item.setTarget_(self)
             item.setRepresentedObject_(text)
 
+    @objc.python_method
+    def _refresh_audio_archive_menu(self):
+        menu = self.audio_archive_submenu
+        if menu is None:
+            return
+        while menu.numberOfItems() > 0:
+            menu.removeItemAtIndex_(0)
+
+        records = self.app.get_recent_audio_records()
+        if not records:
+            empty_item = menu.addItemWithTitle_action_keyEquivalent_("还没有语音记录", None, "")
+            empty_item.setEnabled_(False)
+        else:
+            for record in records:
+                created_at = str(record.get("created_at") or "")
+                try:
+                    timestamp = datetime.fromisoformat(created_at).astimezone().strftime("%m-%d %H:%M:%S")
+                except ValueError:
+                    timestamp = created_at[:19].replace("T", " ")
+                try:
+                    duration = float(record.get("duration_seconds") or 0.0)
+                except (TypeError, ValueError):
+                    duration = 0.0
+                transcript = str(record.get("recognized_text") or "").strip()
+                if not transcript:
+                    transcript = {
+                        "no_speech": "未识别到语音",
+                        "failure": "识别失败",
+                    }.get(record.get("status"), "空结果")
+                preview = self.app.truncate_menu_text(" ".join(transcript.split()), 20)
+                title = f"{timestamp} · {duration:.1f}秒 · {preview}"
+                item = menu.addItemWithTitle_action_keyEquivalent_(
+                    title,
+                    "openAudioRecording:",
+                    "",
+                )
+                item.setTarget_(self)
+                item.setRepresentedObject_(record.get("recording_id", ""))
+
+        menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        folder_item = menu.addItemWithTitle_action_keyEquivalent_(
+            "在 Finder 中打开记录目录…",
+            "openAudioArchive:",
+            "",
+        )
+        folder_item.setTarget_(self)
+
     def _replace_radio_menu(self, menu, items, action_name):
         while menu.numberOfItems() > 0:
             menu.removeItemAtIndex_(0)
@@ -500,6 +555,9 @@ class StatusBarController(NSObject):
         self.app.print_status_to_console()
 
     def menuWillOpen_(self, menu):
+        if menu == self.audio_archive_submenu:
+            self._refresh_audio_archive_menu()
+            return
         self.app.refresh_accessibility_permission_status()
         permissions = self.app.get_permission_status()
         if self.app.pipeline is None:
@@ -511,6 +569,14 @@ class StatusBarController(NSObject):
 
     def exportDiagnostic_(self, sender):
         self.app.export_diagnostic_report()
+
+    def openAudioArchive_(self, sender):
+        self.app.open_audio_archive_folder()
+
+    def openAudioRecording_(self, sender):
+        recording_id = sender.representedObject()
+        if recording_id:
+            self.app.show_audio_recording(str(recording_id))
 
     def openOnboarding_(self, sender):
         self.app.open_onboarding()

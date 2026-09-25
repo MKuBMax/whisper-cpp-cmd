@@ -12,6 +12,7 @@ build/dev/
 .py2app-build-dev/
 .py2app-dist-dev/
 logs/
+audio-recordings/
 config.json
 glossary.txt
 .py2app-assets/

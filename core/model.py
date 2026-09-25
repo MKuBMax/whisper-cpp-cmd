@@ -248,17 +248,24 @@ class WhisperCliBackend:
         
         if self._model_path is None:
             raise RuntimeError("模型未加载")
-        
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-            audio_path = f.name
+
+        # 有归档时直接发送同一个 WAV 文件，确保保存下来的样本就是引擎收到的字节。
+        audio_path = kwargs.get('audio_path')
+        owns_audio_path = not audio_path
+        if owns_audio_path:
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                audio_path = f.name
+        elif not os.path.isfile(audio_path):
+            raise FileNotFoundError(f"识别音频文件不存在：{audio_path}")
         
         try:
-            with wave.open(audio_path, 'wb') as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(16000)
-                audio_int16 = (audio * 32767).astype(np.int16)
-                wf.writeframes(audio_int16.tobytes())
+            if owns_audio_path:
+                with wave.open(audio_path, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(16000)
+                    audio_int16 = (audio * 32767).astype(np.int16)
+                    wf.writeframes(audio_int16.tobytes())
 
             if self._server_process is None:
                 raise RuntimeError("whisper-server 未运行")
@@ -269,7 +276,7 @@ class WhisperCliBackend:
             return self._transcribe_with_retry(audio_path, trace=trace)
             
         finally:
-            if os.path.exists(audio_path):
+            if owns_audio_path and os.path.exists(audio_path):
                 os.remove(audio_path)
     
     def _derive_server_path(self, cli_path: str) -> Optional[str]:
@@ -735,7 +742,11 @@ class ModelEngine:
             logger.info("%s model.transcribe begin samples=%s", trace.prefix("model"), len(audio))
         
         try:
-            text = self._backend.transcribe(audio, trace=trace)
+            text = self._backend.transcribe(
+                audio,
+                trace=trace,
+                audio_path=kwargs.get('audio_path'),
+            )
             processing_time = time.time() - start_time
             logger.info("转录结束：success=%s elapsed=%.2fs", not text.startswith("错误"), processing_time)
             if isinstance(trace, DictationTrace):

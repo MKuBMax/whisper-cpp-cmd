@@ -17,6 +17,7 @@ from .output import OutputHandler, OutputConfig, TextOutput
 from .clipboard import Clipboard, ClipboardConfig
 from .dictation_trace import DictationTrace
 from .audio_quality import analyze_audio
+from .audio_archive import AudioArchive, AudioArchiveEntry
 
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,7 @@ class Pipeline:
         )
         self.processor = Processor(self.config.processor)
         self.model_engine = ModelEngine()
+        self.audio_archive = AudioArchive()
         self.output_handler = OutputHandler(self.config.output)
         self.clipboard = Clipboard(self.config.clipboard)
         
@@ -227,6 +229,7 @@ class Pipeline:
         
         start_time = time.time()
         trace = self.trace
+        archive_entry: Optional[AudioArchiveEntry] = None
         if isinstance(trace, DictationTrace):
             logger.info("%s pipeline.stop_recording begin", trace.prefix("pipeline"))
         logger.info("停止录音并开始处理")
@@ -281,6 +284,7 @@ class Pipeline:
             logger.info("开始预处理：duration=%.2fs samples=%s", duration, len(audio_data))
             if isinstance(trace, DictationTrace):
                 logger.info("%s pre_process begin duration=%.2fs samples=%s", trace.prefix("pre_process"), duration, len(audio_data))
+            ref_cancel_applied = False
             if self.config.ref_cancel and self.config.ref_audio is not None:
                 try:
                     from .ref_cancel import suppress_with_ref
@@ -293,6 +297,7 @@ class Pipeline:
                         stats.get("ref_rms"),
                     )
                     audio_data = cleaned
+                    ref_cancel_applied = True
                 except Exception:
                     logger.warning("参考消除失败，回退原声", exc_info=True)
             process_start = time.time()
@@ -303,8 +308,49 @@ class Pipeline:
             
             if getattr(self, "before_transcribe", None) is not None:
                 self.before_transcribe()
+            try:
+                archive_entry = self.audio_archive.save_pending(
+                    processed_audio,
+                    self.config.audio.sample_rate,
+                    {
+                        "model": self.config.model_name,
+                        "language": self.config.language,
+                        "backend": "whisper-server",
+                        "use_vad": bool(self.config.use_vad),
+                        "ref_cancel_enabled": bool(self.config.ref_cancel),
+                        "ref_cancel_applied": ref_cancel_applied,
+                        "recording_truncated": bool(self.audio_source.overflow),
+                        "recording_duration_seconds": round(duration, 3),
+                        "processor_normalize": bool(self.processor.config.normalize),
+                        "processor_remove_silence": bool(self.processor.config.remove_silence),
+                        "trace_id": trace.trace_id if isinstance(trace, DictationTrace) else None,
+                    },
+                )
+            except Exception:
+                logger.warning("保存识别音频归档失败，继续识别", exc_info=True)
             transcribe_start = time.time()
-            result = self.model_engine.transcribe(processed_audio, trace=trace)
+            result = self.model_engine.transcribe(
+                processed_audio,
+                trace=trace,
+                audio_path=archive_entry.audio_path if archive_entry is not None else None,
+            )
+            if archive_entry is not None:
+                has_text = bool((result.text or "").strip())
+                try:
+                    self.audio_archive.finish(
+                        archive_entry,
+                        {
+                            "status": "success" if result.success and has_text else
+                                     "no_speech" if result.success else "failure",
+                            "success": bool(result.success),
+                            "recognized_text": result.text or "",
+                            "error": result.error,
+                            "model_processing_seconds": round(result.processing_time, 3),
+                            "rtf": round(result.rtf, 3),
+                        },
+                    )
+                except Exception:
+                    logger.warning("更新识别音频归档元数据失败：id=%s", archive_entry.recording_id, exc_info=True)
             logger.info("模型转录完成：elapsed=%.2fs success=%s", time.time() - transcribe_start, result.success)
             if isinstance(trace, DictationTrace):
                 logger.info("%s transcribe done elapsed=%.2fs success=%s", trace.prefix("transcribe"), time.time() - transcribe_start, result.success)

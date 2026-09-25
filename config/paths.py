@@ -101,6 +101,11 @@ def logs_dir() -> str:
     return os.path.join(runtime_root(), "logs")
 
 
+def audio_archive_dir() -> str:
+    """返回最近识别音频的本地归档目录。"""
+    return os.path.join(runtime_root(), "audio-recordings")
+
+
 def models_dir() -> str:
     return os.path.join(runtime_root(), "models")
 

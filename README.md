@@ -104,6 +104,12 @@ bash package_app.sh
 ~/Library/Application Support/WhisperCppCmd/
 ```
 
+为排查识别问题，App 会保存每次交给本地识别引擎的处理后音频，以及识别结果和模型、语言、VAD 等元数据。音频为 WAV，元数据为 JSON；目录最多保留最近 10 条，新记录写入后自动删除更早的记录。从菜单栏“最近语音记录”中选择一条，可查看识别内容并播放音频；子菜单底部可以在 Finder 中打开或手动删除文件。归档保存在：
+
+```text
+~/Library/Application Support/WhisperCppCmd/audio-recordings/
+```
+
 ## License
 
 本项目使用 [MIT License](LICENSE)。第三方组件和模型说明见 [THIRD_PARTY_NOTICES.txt](distribution/THIRD_PARTY_NOTICES.txt)。
