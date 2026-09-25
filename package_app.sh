@@ -17,11 +17,10 @@ WORK_DIR="$(mktemp -d "/tmp/$APP_NAME.distribution.XXXXXX")"
 RUNTIME_SOURCE="$WORK_DIR/whisper-runtime"
 PY2APP_BUILD_DIR="$WORK_DIR/py2app-build"
 PY2APP_DIST_DIR="$WORK_DIR/py2app-dist"
-ICON_SOURCE="$PROJECT_DIR/icons/app_icon.svg"
+ICON_SOURCE="$PROJECT_DIR/icons/app_icon.png"
 ICON_ASSET_DIR="$PROJECT_DIR/.py2app-assets"
 ICON_PATH="$ICON_ASSET_DIR/${APP_NAME}.icns"
 ICONSET_DIR="$WORK_DIR/${APP_NAME}.iconset"
-ICON_RENDER_DIR="$WORK_DIR/${APP_NAME}.icon-render"
 
 cleanup() {
     rm -rf "$WORK_DIR"
@@ -205,18 +204,14 @@ mkdir -p \
     "$RUNTIME_SOURCE/lib" \
     "$RUNTIME_SOURCE/ggml/lib"
 
-# standalone 构建也要从当前 SVG 重新生成 icns，避免沿用上一次 alias 构建的旧图标。
-mkdir -p "$ICON_ASSET_DIR" "$ICONSET_DIR" "$ICON_RENDER_DIR"
+# standalone 构建也要从当前 PNG 重新生成 icns，避免沿用上一次 alias 构建的旧图标。
+mkdir -p "$ICON_ASSET_DIR" "$ICONSET_DIR"
 if [ -f "$ICON_SOURCE" ]; then
-    qlmanage -t -s 1024 -o "$ICON_RENDER_DIR" "$ICON_SOURCE" >/dev/null 2>&1 || true
-    ICON_RENDERED_PATH="$ICON_RENDER_DIR/$(basename "$ICON_SOURCE").png"
-    if [ -f "$ICON_RENDERED_PATH" ]; then
-        for size in 16 32 128 256 512; do
-            sips -z "$size" "$size" "$ICON_RENDERED_PATH" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
-            sips -z "$((size * 2))" "$((size * 2))" "$ICON_RENDERED_PATH" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
-        done
-        iconutil -c icns "$ICONSET_DIR" -o "$ICON_PATH"
-    fi
+    for size in 16 32 128 256 512; do
+        sips -z "$size" "$size" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
+        sips -z "$((size * 2))" "$((size * 2))" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
+    done
+    iconutil -c icns "$ICONSET_DIR" -o "$ICON_PATH"
 fi
 
 # 跟随 Homebrew symlink 复制真实文件，避免分发包依赖打包机的 Cellar 路径。
