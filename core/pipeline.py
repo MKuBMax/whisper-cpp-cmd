@@ -237,6 +237,14 @@ class Pipeline:
         try:
             self.recorder.stop()
             audio_data = self.audio_source.stop_recording()
+            # Keep a copy before reference cancellation and Processor mutate the
+            # recognition path.  This is the actual microphone capture that is
+            # useful when comparing a hallucination against later stages.
+            original_audio = None
+            if audio_data is not None:
+                import numpy as np
+
+                original_audio = np.asarray(audio_data, dtype=np.float32).copy()
             self._fetch_ref_audio()
 
             if audio_data is None or len(audio_data) == 0:
@@ -308,6 +316,32 @@ class Pipeline:
             
             if getattr(self, "before_transcribe", None) is not None:
                 self.before_transcribe()
+
+            # whisper-server applies Silero VAD inside its own process and does
+            # not expose the reduced waveform.  Materialize the same speech
+            # segments for the archive; a failure here must never block the
+            # actual recognition request.
+            vad_audio = None
+            vad_segments = ()
+            vad_applied = False
+            if self.config.use_vad:
+                try:
+                    vad_result = self.model_engine.extract_vad_audio(
+                        processed_audio,
+                        self.config.audio.sample_rate,
+                    )
+                    if vad_result is not None:
+                        vad_audio = vad_result.audio
+                        vad_segments = vad_result.segments
+                        vad_applied = True
+                        logger.info(
+                            "VAD 归档音频生成：segments=%s duration=%.2fs",
+                            len(vad_segments),
+                            len(vad_audio) / self.config.audio.sample_rate,
+                        )
+                except Exception:
+                    logger.warning("生成 VAD 后归档音频失败，继续识别", exc_info=True)
+
             try:
                 archive_entry = self.audio_archive.save_pending(
                     processed_audio,
@@ -323,8 +357,14 @@ class Pipeline:
                         "recording_duration_seconds": round(duration, 3),
                         "processor_normalize": bool(self.processor.config.normalize),
                         "processor_remove_silence": bool(self.processor.config.remove_silence),
+                        "model_input_stage": "after_ref_cancel_and_processor_before_server_vad",
+                        "vad_applied": vad_applied,
+                        "vad_source": "model_input" if vad_applied else None,
                         "trace_id": trace.trace_id if isinstance(trace, DictationTrace) else None,
                     },
+                    original_audio=original_audio,
+                    vad_audio=vad_audio,
+                    vad_segments=vad_segments,
                 )
             except Exception:
                 logger.warning("保存识别音频归档失败，继续识别", exc_info=True)

@@ -154,6 +154,9 @@ class WhisperCliBackend:
         self._server_path = self._derive_server_path(cli_path)
         self._health_error: str = ""
         self._initial_prompt: str = ""
+        self._resolved_vad_model_path: Optional[str] = None
+        self._server_vad_enabled = False
+        self._vad_extractor = None
     
     @property
     def is_loaded(self) -> bool:
@@ -278,6 +281,25 @@ class WhisperCliBackend:
         finally:
             if owns_audio_path and os.path.exists(audio_path):
                 os.remove(audio_path)
+
+    def extract_vad_audio(self, audio: np.ndarray, sample_rate: int):
+        """Materialize the speech-only waveform using the server's VAD model."""
+        if not self._use_vad or not self._server_vad_enabled:
+            return None
+        vad_model = self._resolved_vad_model_path or self._resolve_vad_model()
+        if not vad_model:
+            raise RuntimeError("VAD 模型不可用")
+        if not self._server_path:
+            raise RuntimeError("未找到 whisper-server，无法导出 VAD 音频")
+        if self._vad_extractor is None:
+            from .vad_audio import VADAudioExtractor
+
+            self._vad_extractor = VADAudioExtractor(
+                vad_model,
+                runtime_binary=self._server_path,
+                n_threads=self.n_threads,
+            )
+        return self._vad_extractor.extract(audio, sample_rate)
     
     def _derive_server_path(self, cli_path: str) -> Optional[str]:
         if not cli_path:
@@ -304,6 +326,8 @@ class WhisperCliBackend:
     
     def _build_server_cmd(self) -> list:
         """构建 whisper-server 启动命令。"""
+        self._resolved_vad_model_path = None
+        self._server_vad_enabled = False
         cmd = [
             self._server_path,
             '-m', self._model_path,
@@ -320,6 +344,8 @@ class WhisperCliBackend:
         if self._use_vad:
             vad_path = self._resolve_vad_model()
             if vad_path:
+                self._resolved_vad_model_path = vad_path
+                self._server_vad_enabled = True
                 cmd.extend(['--vad', '--vad-model', vad_path])
                 logger.info("VAD 已启用：model=%s", vad_path)
             else:
@@ -411,6 +437,14 @@ class WhisperCliBackend:
         raise RuntimeError(self._build_server_failure_message("启动超时"))
     
     def _stop_server(self) -> None:
+        if self._vad_extractor is not None:
+            try:
+                self._vad_extractor.close()
+            except Exception:
+                logger.warning("释放 VAD 归档上下文失败", exc_info=True)
+            finally:
+                self._vad_extractor = None
+
         if self._server_process is None:
             self._server_port = None
             self._cleanup_server_log()
@@ -780,3 +814,12 @@ class ModelEngine:
                 success=False,
                 error=str(e)
             )
+
+    def extract_vad_audio(self, audio: np.ndarray, sample_rate: int):
+        """Return the backend's materialized VAD waveform when supported."""
+        if self._backend is None:
+            return None
+        extractor = getattr(self._backend, 'extract_vad_audio', None)
+        if not callable(extractor):
+            return None
+        return extractor(audio, sample_rate)

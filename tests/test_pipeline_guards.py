@@ -98,3 +98,42 @@ def test_ref_is_cut_after_microphone_stops():
     pipeline.stop_recording()
     assert events.index("stop microphone") < events.index("cut sysref")
     assert events.index("cut sysref") < events.index("wait for model")
+
+
+def test_archive_receives_original_audio_before_processor():
+    raw_audio = np.linspace(-0.2, 0.2, 16_000, dtype=np.float32)
+    pipeline = _pipeline_for_audio(raw_audio)
+    captured = {}
+
+    pipeline.processor = SimpleNamespace(
+        config=SimpleNamespace(normalize=False, remove_silence=False),
+        process=lambda audio, _sample_rate: audio * 2,
+    )
+    pipeline.audio_source.overflow = False
+    pipeline.audio_archive = SimpleNamespace(
+        save_pending=lambda *args, **kwargs: (
+            captured.update(args=args, kwargs=kwargs)
+            or SimpleNamespace(
+                recording_id="test",
+                audio_path="/tmp/test.wav",
+                metadata_path="/tmp/test.json",
+            )
+        ),
+        finish=lambda *_args, **_kwargs: None,
+    )
+    pipeline.model_engine = SimpleNamespace(
+        transcribe=lambda *_args, **_kwargs: SimpleNamespace(
+            text="你好",
+            model_name="large-v3",
+            success=True,
+            error=None,
+            rtf=0.1,
+            processing_time=0.01,
+        ),
+    )
+
+    result = pipeline.stop_recording(paste_output=False)
+
+    assert result.success is True
+    np.testing.assert_allclose(captured["args"][0], raw_audio * 2)
+    np.testing.assert_allclose(captured["kwargs"]["original_audio"], raw_audio)

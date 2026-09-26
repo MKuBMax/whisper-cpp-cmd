@@ -24,7 +24,10 @@ class AudioRecordingWindowController(NSObject):
         self.status_label = None
         self.text_view = None
         self.play_button = None
+        self.original_play_button = None
+        self.vad_play_button = None
         self.stop_button = None
+        self._playing_button = None
         return self
 
     @objc.python_method
@@ -54,8 +57,16 @@ class AudioRecordingWindowController(NSObject):
         self.details_label = self._label("", 24, 403, 572, 22, 12, secondary=True)
         self.status_label = self._label("", 24, 376, 572, 22, 13)
 
-        self.play_button = self._button("播放录音", "playRecording:", 24, 332, 112)
-        self.stop_button = self._button("停止", "stopPlayback:", 148, 332, 88)
+        self.original_play_button = self._button(
+            "播放原始音频", "playOriginalRecording:", 24, 332, 112
+        )
+        self.play_button = self._button(
+            "播放送入引擎", "playRecording:", 148, 332, 112
+        )
+        self.vad_play_button = self._button(
+            "播放 VAD 后", "playVadRecording:", 272, 332, 112
+        )
+        self.stop_button = self._button("停止", "stopPlayback:", 396, 332, 80)
         self.stop_button.setEnabled_(False)
 
         self._label("识别内容", 24, 294, 572, 22, 14)
@@ -101,7 +112,9 @@ class AudioRecordingWindowController(NSObject):
             self.details_label.setStringValue_("")
             self.status_label.setStringValue_("")
             self.text_view.setString_("")
+            self.original_play_button.setEnabled_(False)
             self.play_button.setEnabled_(False)
+            self.vad_play_button.setEnabled_(False)
             return
 
         created_at = str(record.get("created_at") or "")
@@ -112,13 +125,20 @@ class AudioRecordingWindowController(NSObject):
         self.window.setTitle_(f"语音记录 · {timestamp}")
         self.title_label.setStringValue_(timestamp)
 
-        duration = float(record.get("duration_seconds") or 0.0)
+        duration = float(
+            record.get("recording_duration_seconds")
+            or record.get("original_duration_seconds")
+            or record.get("duration_seconds")
+            or 0.0
+        )
         model = str(record.get("model") or "未知")
         language = str(record.get("language") or "未知")
         vad = "开启" if record.get("use_vad") else "关闭"
         reference_cancel = "开启" if record.get("ref_cancel_applied") else "未应用"
+        vad_duration = record.get("vad_duration_seconds")
+        vad_detail = f"  · VAD 后 {float(vad_duration):.1f} 秒" if vad_duration is not None else ""
         self.details_label.setStringValue_(
-            f"{duration:.1f} 秒  ·  模型 {model}  ·  语言 {language}  ·  VAD {vad}  ·  参考消除 {reference_cancel}"
+            f"{duration:.1f} 秒{vad_detail}  ·  模型 {model}  ·  语言 {language}  ·  VAD {vad}  ·  参考消除 {reference_cancel}"
         )
 
         status = record.get("status")
@@ -144,16 +164,45 @@ class AudioRecordingWindowController(NSObject):
             transcript = "没有可显示的识别文字。"
         self.text_view.setString_(transcript)
 
+        original_path = str(record.get("original_audio_path") or "")
         audio_path = str(record.get("audio_path") or "")
+        vad_path = str(record.get("vad_audio_path") or "")
+        self.original_play_button.setEnabled_(
+            bool(original_path and os.path.isfile(original_path))
+        )
         self.play_button.setEnabled_(bool(audio_path and os.path.isfile(audio_path)))
+        self.vad_play_button.setEnabled_(bool(vad_path and os.path.isfile(vad_path)))
         if not audio_path or not os.path.isfile(audio_path):
             self.status_label.setStringValue_("录音文件已被删除")
+        elif record.get("use_vad") and not vad_path:
+            self.status_label.setStringValue_("VAD 后音频未生成，可播放送入引擎的音频")
 
     def playRecording_(self, sender):
-        audio_path = str((self.record or {}).get("audio_path") or "")
+        self._play_audio(
+            str((self.record or {}).get("audio_path") or ""),
+            self.play_button,
+            "送入引擎的音频",
+        )
+
+    def playOriginalRecording_(self, sender):
+        self._play_audio(
+            str((self.record or {}).get("original_audio_path") or ""),
+            self.original_play_button,
+            "原始音频",
+        )
+
+    def playVadRecording_(self, sender):
+        self._play_audio(
+            str((self.record or {}).get("vad_audio_path") or ""),
+            self.vad_play_button,
+            "VAD 后音频",
+        )
+
+    def _play_audio(self, audio_path, button, label):
         if not audio_path or not os.path.isfile(audio_path):
             self.status_label.setStringValue_("录音文件已被删除")
-            self.play_button.setEnabled_(False)
+            if button is not None:
+                button.setEnabled_(False)
             return
 
         self._stop_playback()
@@ -171,8 +220,9 @@ class AudioRecordingWindowController(NSObject):
             sound.setDelegate_(None)
             self.status_label.setStringValue_("播放失败")
             return
-        self.status_label.setStringValue_("正在播放录音…")
-        self.play_button.setEnabled_(False)
+        self._playing_button = button
+        self.status_label.setStringValue_(f"正在播放{label}…")
+        self._set_play_buttons_enabled(False)
         self.stop_button.setEnabled_(True)
 
     def stopPlayback_(self, sender):
@@ -184,20 +234,32 @@ class AudioRecordingWindowController(NSObject):
     def _stop_playback(self):
         sound = self.sound
         self.sound = None
+        self._playing_button = None
         if sound is not None:
             sound.setDelegate_(None)
             sound.stop()
-        if self.play_button is not None:
-            audio_path = str((self.record or {}).get("audio_path") or "")
-            self.play_button.setEnabled_(bool(audio_path and os.path.isfile(audio_path)))
+        self._set_play_buttons_enabled(True)
         if self.stop_button is not None:
             self.stop_button.setEnabled_(False)
+
+    def _set_play_buttons_enabled(self, enabled):
+        paths = (
+            (self.original_play_button, "original_audio_path"),
+            (self.play_button, "audio_path"),
+            (self.vad_play_button, "vad_audio_path"),
+        )
+        for button, field in paths:
+            if button is None:
+                continue
+            audio_path = str((self.record or {}).get(field) or "")
+            button.setEnabled_(bool(enabled and audio_path and os.path.isfile(audio_path)))
 
     def sound_didFinishPlaying_(self, sound, finished):
         if self.sound is None or sound != self.sound:
             return
         self.sound = None
-        self.play_button.setEnabled_(True)
+        self._playing_button = None
+        self._set_play_buttons_enabled(True)
         self.stop_button.setEnabled_(False)
         self.status_label.setStringValue_("播放完成" if finished else "播放已结束")
 
