@@ -181,6 +181,32 @@ _HOTKEY_LABELS = {
     "f14": "F14",
 }
 _HOTKEY_KEYS = {name: getattr(keyboard.Key, name) for name in _HOTKEY_LABELS}
+# macOS virtual key codes used only by the release watchdog.  pynput remains
+# the source of the press/release events; Quartz is a fallback for the rare
+# short-tap case where the event tap reports the press but drops the release.
+_HOTKEY_KEYCODES = {
+    "cmd_r": 54,
+    "cmd_l": 55,
+    "alt_r": 61,
+    "alt_l": 58,
+    "shift_r": 60,
+    "shift_l": 56,
+    "ctrl_r": 62,
+    "ctrl_l": 59,
+    "f13": 105,
+    "f14": 107,
+}
+_HOTKEY_FLAG_MASKS = {
+    "cmd_r": "kCGEventFlagMaskCommand",
+    "cmd_l": "kCGEventFlagMaskCommand",
+    "alt_r": "kCGEventFlagMaskAlternate",
+    "alt_l": "kCGEventFlagMaskAlternate",
+    "shift_r": "kCGEventFlagMaskShift",
+    "shift_l": "kCGEventFlagMaskShift",
+    "ctrl_r": "kCGEventFlagMaskControl",
+    "ctrl_l": "kCGEventFlagMaskControl",
+}
+_HOTKEY_RELEASE_POLL_SECONDS = 0.15
 
 # 显式状态机：合法状态 + 允许的转移（from → {to}）。
 # 偏离此表的转移在 _set_state 打 WARNING（但仍执行，不改行为），用于早一步暴露
@@ -302,6 +328,8 @@ class VoiceInputApp:
         self._backend_warmup_lock = threading.Lock()
         self._current_trace: DictationTrace | None = None
         self._active_trace: DictationTrace | None = None
+        self._active_trace_lock = threading.Lock()
+        self._hotkey_release_timer: threading.Timer | None = None
         self._dictation_queue: queue.Queue | None = None
         self._dictation_worker: threading.Thread | None = None
         self._worker_heartbeat: float = time.monotonic()
@@ -1911,6 +1939,100 @@ class VoiceInputApp:
         """当前配置的录音触发键（pynput Key 对象）；未知值回退右 Command。"""
         return _HOTKEY_KEYS.get(self.settings.hotkey, keyboard.Key.cmd_r)
 
+    def _hotkey_is_down(self):
+        """读取当前热键的物理状态，作为 pynput 释放事件的兜底。"""
+        if Quartz is None:
+            # 没有 Quartz 时不能安全判断“仍按住”，宁可让 watchdog 不介入，
+            # 也不能把正常的长按误判成已经释放。
+            return True
+        if getattr(self, "_accessibility_trusted", True) is False:
+            return True
+
+        hotkey_name = getattr(self.settings, "hotkey", "cmd_r")
+        flag_name = _HOTKEY_FLAG_MASKS.get(hotkey_name)
+        if flag_name is not None:
+            flag_mask = getattr(Quartz, flag_name, None)
+            if flag_mask is not None:
+                try:
+                    flags = Quartz.CGEventSourceFlagsState(
+                        Quartz.kCGEventSourceStateHIDSystemState,
+                    )
+                    return bool(flags & flag_mask)
+                except Exception:
+                    self._logger.debug("读取热键 modifier 状态失败", exc_info=True)
+                    return True
+
+        keycode = _HOTKEY_KEYCODES.get(hotkey_name)
+        if keycode is None:
+            return True
+        try:
+            return bool(
+                Quartz.CGEventSourceKeyState(
+                    Quartz.kCGEventSourceStateHIDSystemState,
+                    keycode,
+                )
+            )
+        except Exception:
+            self._logger.debug("读取热键物理状态失败", exc_info=True)
+            return True
+
+    def _take_active_trace(self, expected=None):
+        """原子地取出当前录音上下文，并取消对应的释放 watchdog。"""
+        with self._active_trace_lock:
+            trace = self._active_trace
+            if trace is None or (expected is not None and trace is not expected):
+                return None
+            self._active_trace = None
+            timer = self._hotkey_release_timer
+            self._hotkey_release_timer = None
+        if timer is not None:
+            timer.cancel()
+        return trace
+
+    def _schedule_hotkey_release_watchdog(self, trace):
+        """轮询物理按键，补回可能丢失的极短按键释放事件。"""
+        timer = threading.Timer(
+            _HOTKEY_RELEASE_POLL_SECONDS,
+            self._check_hotkey_release,
+            args=(trace,),
+        )
+        timer.daemon = True
+        with self._active_trace_lock:
+            if self._active_trace is not trace:
+                return
+            previous = self._hotkey_release_timer
+            self._hotkey_release_timer = timer
+        if previous is not None:
+            previous.cancel()
+        timer.start()
+
+    def _cancel_hotkey_release_watchdog(self):
+        with self._active_trace_lock:
+            timer = getattr(self, "_hotkey_release_timer", None)
+            self._hotkey_release_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _check_hotkey_release(self, trace):
+        """若监听器漏掉 release，按物理状态补发一次同一 trace 的 release。"""
+        with self._active_trace_lock:
+            if self._active_trace is not trace:
+                return
+
+        if self._hotkey_is_down():
+            self._schedule_hotkey_release_watchdog(trace)
+            return
+
+        trace = self._take_active_trace(expected=trace)
+        if trace is None:
+            return
+        self._logger.warning(
+            "%s 未收到按键释放事件，物理按键已抬起，自动补发释放",
+            trace.prefix("release_recover"),
+        )
+        if self._dictation_queue is not None:
+            self._dictation_queue.put(("release", trace))
+
     def _on_press(self, key):
         """按键按下事件（pynput 监听线程）：只做轻量检查并投递事件，重操作交给 DictationWorker。"""
         if self._paused:
@@ -1918,24 +2040,30 @@ class VoiceInputApp:
         if self.pipeline is None:
             return
         if key == self._hotkey_target():
-            if self._active_trace is not None or self._state == "processing" or self._worker_busy:
+            if self._state == "processing" or getattr(self, "_worker_busy", False):
                 return
-            if self._pipeline_transitioning:
+            if getattr(self, "_pipeline_transitioning", False):
                 self._logger.info("按键按下忽略：后端重建中")
                 return
-            trace = DictationTrace.create()
-            self._active_trace = trace
+            with self._active_trace_lock:
+                if self._active_trace is not None:
+                    return
+                trace = DictationTrace.create()
+                self._active_trace = trace
+            if self._dictation_queue is None:
+                self._take_active_trace(expected=trace)
+                self._logger.info("%s 按键按下忽略：DictationWorker 尚未就绪", trace.prefix("press"))
+                return
             self._logger.info("%s 按键按下：右Command", trace.prefix("press") if trace else "[press]")
-            if self._dictation_queue is not None:
-                self._dictation_queue.put(("press", trace))
+            self._dictation_queue.put(("press", trace))
+            self._schedule_hotkey_release_watchdog(trace)
 
     def _on_release(self, key):
         """按键释放事件（pynput 监听线程）：投递事件后立即返回，不等待转录。"""
         if key == self._hotkey_target():
-            trace = self._active_trace
+            trace = self._take_active_trace()
             if trace is None:
                 return
-            self._active_trace = None
             self._logger.info("%s 按键释放：右Command", trace.prefix("release") if trace else "[release]")
             if self._dictation_queue is not None:
                 self._dictation_queue.put(("release", trace))
@@ -2388,6 +2516,7 @@ class VoiceInputApp:
         self._set_state("idle")
         self._cancel_error_reset_timer()
         self._cancel_idle_release_timer()
+        self._cancel_hotkey_release_watchdog()
 
         if self.listener:
             self.listener.stop()

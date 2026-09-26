@@ -30,6 +30,8 @@ def _make_app():
     app._sleep_wake_observer = None
     app._sysref = None
     app._sysref_lock = threading.Lock()
+    app._active_trace_lock = threading.Lock()
+    app._hotkey_release_timer = None
     app._set_state = lambda *_a, **_k: None        # 避开状态机 UI 副作用
     app._cancel_error_reset_timer = lambda: None
     app._cancel_idle_release_timer = lambda: None
